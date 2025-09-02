@@ -162,27 +162,27 @@ impl<T: NoirUltraHonkProver<C>, C: CurveGroup> Clone for CoUltraOp<T, C> {
 
 #[derive(Debug)]
 pub struct CoEccvmRowTracker<T: NoirUltraHonkProver<C>, C: CurveGroup> {
-    pub cached_num_muls: T::ArithmeticShare,
-    pub cached_active_msm_count: T::ArithmeticShare,
+    pub cached_num_muls: T::BaseFieldArithmeticShare,
+    pub cached_active_msm_count: T::BaseFieldArithmeticShare,
     pub num_transcript_rows: u32,
-    pub num_precompute_table_rows: T::ArithmeticShare,
-    pub num_msm_rows: T::ArithmeticShare,
+    pub num_precompute_table_rows: T::BaseFieldArithmeticShare,
+    pub num_msm_rows: T::BaseFieldArithmeticShare,
 }
 impl<T: NoirUltraHonkProver<C>, C: CurveGroup> Default for CoEccvmRowTracker<T, C> {
     fn default() -> Self {
         Self {
-            cached_num_muls: T::ArithmeticShare::default(),
-            cached_active_msm_count: T::ArithmeticShare::default(),
+            cached_num_muls: T::BaseFieldArithmeticShare::default(),
+            cached_active_msm_count: T::BaseFieldArithmeticShare::default(),
             num_transcript_rows: 0,
-            num_precompute_table_rows: T::ArithmeticShare::default(),
-            num_msm_rows: T::ArithmeticShare::default(),
+            num_precompute_table_rows: T::BaseFieldArithmeticShare::default(),
+            num_msm_rows: T::BaseFieldArithmeticShare::default(),
         }
     }
 }
 
 impl<T: NoirUltraHonkProver<C>, C: CurveGroup> CoEccvmRowTracker<T, C> {
-    pub fn get_number_of_muls(&self) -> T::ArithmeticShare {
-        T::add(self.cached_num_muls, self.cached_active_msm_count)
+    pub fn get_number_of_muls(&self) -> T::BaseFieldArithmeticShare {
+        T::add_basefield(self.cached_num_muls, self.cached_active_msm_count)
     }
 
     pub fn num_eccvm_msm_rows(
@@ -319,7 +319,7 @@ impl<T: NoirUltraHonkProver<C>, C: CurveGroup> CoECCOpQueue<T, C> {
     /**
      * @brief get number of muls for the current ECCVM circuit
      */
-    pub fn get_number_of_muls(&self) -> T::ArithmeticShare {
+    pub fn get_number_of_muls(&self) -> T::BaseFieldArithmeticShare {
         self.eccvm_row_tracker.get_number_of_muls()
     }
 

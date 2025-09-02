@@ -473,6 +473,12 @@ pub trait NoirUltraHonkProver<P: CurveGroup>: Send + Sized {
         state: &mut Self::State,
     ) -> eyre::Result<()>;
 
+    fn inv_many_in_place_no_leaking<N: Network>(
+        a: &mut [Self::ArithmeticShare],
+        net: &N,
+        state: &mut Self::State,
+    ) -> eyre::Result<()>;
+
     /// Perform msm between `points` and `scalars`
     fn msm_public_points(
         points: &[P::Affine],

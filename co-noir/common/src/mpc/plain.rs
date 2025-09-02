@@ -446,6 +446,14 @@ impl<P: CurveGroup> NoirUltraHonkProver<P> for PlainUltraHonkDriver {
         todo!()
     }
 
+    fn inv_many_in_place_no_leaking<N: Network>(
+        a: &mut [Self::ArithmeticShare],
+        net: &N,
+        state: &mut Self::State,
+    ) -> eyre::Result<()> {
+        todo!()
+    }
+
     // fn is_zero_binary_many<N: Network>(
     //     a: &[Self::BinaryShare],
     //     _net: &N,

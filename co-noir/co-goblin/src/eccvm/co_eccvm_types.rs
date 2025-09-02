@@ -589,6 +589,7 @@ fn compute_inverse_trace_coordinates<
     Ok(())
 }
 
+#[expect(clippy::too_many_arguments)]
 fn compute_lambda_numerator_and_denominator<
     C: HonkCurve<TranscriptFieldType>,
     T: NoirUltraHonkProver<C>,
@@ -786,26 +787,28 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     // during the first iteration over the ECCOpQueue, the operations are being performed using Jacobian
     // coordinates and the base point coordinates are recorded in the transcript. at the same time, the transcript
     // logic is being populated
-    let mut tmp_z1_is_zero = Vec::new(); // TODO FLORIN
-    let mut tmp_z2_is_zero = Vec::new(); // TODO FLORIN
-    let mut indices = Vec::new(); // TODO FLORIN
+
     let mut base_points = Vec::new(); // TODO FLORIN
     let mut entry_z1 = Vec::new(); // TODO FLORIN
     let mut entry_z2 = Vec::new(); // TODO FLORIN
-    for (i, entry) in vm_operations.iter().enumerate() {
+    for entry in vm_operations.iter() {
         entry_z1.push(entry.z1);
         entry_z2.push(entry.z2);
         base_points.push(entry.base_point);
     }
-    let is_zero_results = T::is_zero_many_basefield(&[entry_z1, entry_z2].concat(), net, state_)?;
-    let (mut z1_zero_results, mut z2_zero_results) = is_zero_results.split_at(tmp_z1_is_zero.len()); // TODO FLORIN SIZES
-    let (z1_is_zero_unchanged, z2_is_zero_unchanged) =
-        (z1_zero_results.to_vec(), z2_zero_results.to_vec());
-    T::scale_many_in_place_basefield(&mut z1_zero_results, -C::BaseField::one());
-    T::add_scalar_in_place_basefield(&mut z1_zero_results, C::BaseField::one(), state_.id());
-    T::scale_many_in_place_basefield(&mut z2_zero_results, -C::BaseField::one());
-    T::add_scalar_in_place_basefield(&mut z2_zero_results, C::BaseField::one(), state_.id());
-    let num_mul_partial = T::add_many_basefield(&z1_zero_results, &z2_zero_results);
+    let mut is_zero_results =
+        T::is_zero_many_basefield(&[entry_z1, entry_z2].concat(), net, state_)?;
+    let (z1_zero_results_slice, z2_zero_results_slice) =
+        is_zero_results.split_at_mut(base_points.len()); // TODO FLORIN SIZES
+    let (z1_is_zero_unchanged, z2_is_zero_unchanged) = (
+        z1_zero_results_slice.to_vec(),
+        z2_zero_results_slice.to_vec(),
+    );
+    T::scale_many_in_place_basefield(z1_zero_results_slice, -C::BaseField::one());
+    T::add_scalar_in_place_basefield(z1_zero_results_slice, C::BaseField::one(), state_.id());
+    T::scale_many_in_place_basefield(z2_zero_results_slice, -C::BaseField::one());
+    T::add_scalar_in_place_basefield(z2_zero_results_slice, C::BaseField::one(), state_.id());
+    let num_mul_partial = T::add_many_basefield(z1_zero_results_slice, z2_zero_results_slice);
 
     let base_points_is_zero = T::point_is_zero_many(&base_points, net, state_)?;
     let mut base_points_is_zero_modified = base_points_is_zero.clone();
@@ -897,7 +900,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
                 T::convert_fields(&[is_zero])?[0],
                 net,
                 state_,
-            ); //TODO NEED TO MULTYIPLY/CORRECT THIS WITH THE IS_ZEROCHECK
+            )?; //TODO NEED TO MULTYIPLY/CORRECT THIS WITH THE IS_ZEROCHECK
         } else {
             msm_accumulator_trace[i] = T::PointShare::default();
             intermediate_accumulator_trace[i] = T::PointShare::default();
@@ -911,7 +914,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
                 T::convert_fields(&[old_state_accumulator_is_zero])?[0],
                 net,
                 state_,
-            );
+            )?;
         }
 
         row.z1_zero = z1_is_zero_unchanged[i]; // We do this already outside of the function
@@ -926,7 +929,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
             msm_transition,
             net,
             state_,
-        );
+        )?;
 
         msm_count_at_transition_inverse_trace[i] = T::add_basefield(state.count, num_muls);
 
@@ -977,20 +980,21 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     //     net,
     //     state_,
     // );
-
+    let accumulator_trace_len = accumulator_trace.len();
+    let msm_accumulator_trace_len = msm_accumulator_trace.len();
     let (xs, ys, inf) = T::pointshare_to_field_shares_many(
         &[
-            accumulator_trace,
-            msm_accumulator_trace,
-            intermediate_accumulator_trace,
+            accumulator_trace.clone(),
+            msm_accumulator_trace.clone(),
+            intermediate_accumulator_trace.clone(),
         ]
         .concat(),
         net,
         state_,
     )?;
     //TODO FLORIN: check sizes
-    let len_acc = accumulator_trace.len();
-    let len_msm = msm_accumulator_trace.len();
+    let len_acc = accumulator_trace_len;
+    let len_msm = msm_accumulator_trace_len;
     let (acc_xs, rest) = xs.split_at(len_acc);
     let (msm_xs, int_xs) = rest.split_at(len_msm);
     let (acc_ys, rest) = ys.split_at(len_acc);
@@ -998,7 +1002,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     let (acc_inf, rest) = inf.split_at(len_acc);
     let (msm_inf, int_inf) = rest.split_at(len_msm);
 
-    for i in 0..accumulator_trace.len() {
+    for i in 0..accumulator_trace_len {
         let row = &mut transcript_state[i + 1];
         row.accumulator_x = acc_xs[i];
         row.accumulator_y = acc_ys[i];
@@ -1046,7 +1050,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     // )?;
 
     let mut is_zero_vm_point = Vec::new();
-    for i in 0..accumulator_trace.len() {
+    for i in 0..accumulator_trace_len {
         let entry = &vm_operations[i];
         if entry.op_code.add {
             is_zero_vm_point.push(vm_operations[i].base_point);
@@ -1070,7 +1074,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     );
     let (transcript_add_x_equal, transcript_add_y_equal) =
         transcript_add_values.split_at(transcript_add_values.len() / 2);
-    for i in 0..accumulator_trace.len() {
+    for i in 0..accumulator_trace_len {
         let row = &mut transcript_state[i + 1];
         let msm_transition = row.msm_transition;
 
@@ -1093,7 +1097,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
             &mut inverse_trace_y[i],
             net,
             state_,
-        );
+        )?;
 
         row.transcript_add_x_equal = transcript_add_x_equal[i]; //(vm_x == accumulator_x) || (vm_infinity && accumulator_infinity);
         row.transcript_add_y_equal = transcript_add_y_equal[i]; //(vm_y == accumulator_y) || (vm_infinity && accumulator_infinity);
@@ -1135,7 +1139,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     let mut tmp_inverse_trace_y = Vec::new(); //TODO FLORIN
     let mut tmp_msm_transition = Vec::new(); //TODO FLORIN
     let mut indices = Vec::new(); //TODO FLORIN
-    for i in 0..accumulator_trace.len() {
+    for i in 0..accumulator_trace_len {
         let row = &transcript_state[i + 1];
         if vm_operations[i].op_code.add {
             continue;
@@ -1182,19 +1186,21 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     }
 
     // Perform all required inversions at once
-    ark_ff::batch_inversion(&mut inverse_trace_x);
-    ark_ff::batch_inversion(&mut inverse_trace_y);
-    ark_ff::batch_inversion(&mut transcript_msm_x_inverse_trace);
-    ark_ff::batch_inversion(&mut add_lambda_denominator);
-    ark_ff::batch_inversion(&mut msm_count_at_transition_inverse_trace);
+    //TODO FLORIN: INVERT THESE:
+    // ark_ff::batch_inversion(&mut inverse_trace_x);
+    // ark_ff::batch_inversion(&mut inverse_trace_y);
+    // ark_ff::batch_inversion(&mut transcript_msm_x_inverse_trace);
+    // ark_ff::batch_inversion(&mut add_lambda_denominator);
+    // ark_ff::batch_inversion(&mut msm_count_at_transition_inverse_trace);
 
     // Populate the fields of the transcript row containing inverted scalars
+    let mul = T::mul_many_basefield(&add_lambda_numerator, &add_lambda_denominator, net, state_)?;
     for i in 0..num_vm_entries {
         let row = &mut transcript_state[i + 1];
         row.base_x_inverse = inverse_trace_x[i];
         row.base_y_inverse = inverse_trace_y[i];
         row.transcript_msm_x_inverse = transcript_msm_x_inverse_trace[i];
-        row.transcript_add_lambda = add_lambda_numerator[i] * add_lambda_denominator[i];
+        row.transcript_add_lambda = mul[i];
         row.msm_count_at_transition_inverse = msm_count_at_transition_inverse_trace[i];
     }
 
@@ -1209,15 +1215,20 @@ pub fn construct_from_builder<
     C: HonkCurve<TranscriptFieldType>,
     T: NoirUltraHonkProver<C::CycleGroup>,
     A: NoirUltraHonkProver<C>,
+    N: Network,
 >(
     op_queue: &mut CoECCOpQueue<T, C::CycleGroup>,
-) -> Polynomials<A::ArithmeticShare, C::ScalarField, ECCVMFlavour>
+    net: &N,
+    state_: &mut T::State,
+) -> eyre::Result<Polynomials<A::ArithmeticShare, C::ScalarField, ECCVMFlavour>>
 where
     A::ArithmeticShare: From<T::ArithmeticShare>,
 {
     let eccvm_ops = op_queue.get_eccvm_ops().to_vec();
     let number_of_muls = op_queue.get_number_of_muls();
-    // let transcript_rows = compute_rows::<C::CycleGroup, T>(&eccvm_ops, number_of_muls);
+    let transcript_rows =
+        compute_rows::<C::CycleGroup, T, N>(&eccvm_ops, number_of_muls, net, state_)
+            .expect("Failed to compute transcript rows");
 
     todo!()
 }
