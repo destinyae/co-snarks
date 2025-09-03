@@ -66,6 +66,8 @@ impl<F: PrimeField> NoirWitnessExtensionProtocol<F> for PlainAcvmSolver<F> {
     type ArithmeticShare = F;
     type AcvmType = F;
     type AcvmPoint<C: CurveGroup<BaseField = F>> = C;
+    type OtherArithmeticShare<C: CurveGroup<BaseField = F>> = C::ScalarField;
+    type OtherAcvmType<C: CurveGroup<BaseField = F>> = C::ScalarField;
 
     type BrilligDriver = PlainBrilligDriver<F>;
 
@@ -118,7 +120,7 @@ impl<F: PrimeField> NoirWitnessExtensionProtocol<F> for PlainAcvmSolver<F> {
         *secret += public;
     }
 
-    fn sub(&mut self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType {
+    fn sub(&self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType {
         share_1 - share_2
     }
 
@@ -884,5 +886,28 @@ impl<F: PrimeField> NoirWitnessExtensionProtocol<F> for PlainAcvmSolver<F> {
         panic!(
             "accumulate_from_sparse_bytes not implemented for plaindriver and normally should not be called"
         );
+    }
+
+    fn pointshare_to_field_shares_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        point: &[Self::AcvmPoint<C>],
+    ) -> eyre::Result<(
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+    )> {
+        todo!()
+    }
+
+    fn mul_many(
+        &mut self,
+        secrets_1: &[Self::AcvmType],
+        secrets_2: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
+    }
+
+    fn is_zero_many(&mut self, a: &[Self::AcvmType]) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
     }
 }

@@ -216,10 +216,16 @@ impl<'a, F: PrimeField, N: Network> Rep3AcvmSolver<'a, F, N> {
 }
 
 // For some intermediate representations
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum Rep3AcvmPoint<C: CurveGroup> {
     Public(C),
     Shared(Rep3PointShare<C>),
+}
+
+impl<C: CurveGroup> Default for Rep3AcvmPoint<C> {
+    fn default() -> Self {
+        Self::Public(C::zero())
+    }
 }
 
 impl<C: CurveGroup> std::fmt::Debug for Rep3AcvmPoint<C> {
@@ -251,7 +257,7 @@ impl<C: CurveGroup> From<C> for Rep3AcvmPoint<C> {
 
 // TODO maybe we want to merge that with the Rep3VmType?? Atm we do not need
 // binary shares so maybe it is ok..
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Copy)]
 pub enum Rep3AcvmType<F: PrimeField> {
     Public(
         #[serde(
@@ -350,6 +356,9 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for Rep3Acvm
 
     type AcvmType = Rep3AcvmType<F>;
     type AcvmPoint<C: CurveGroup<BaseField = F>> = Rep3AcvmPoint<C>;
+    type OtherArithmeticShare<C: CurveGroup<BaseField = F>> = Rep3PrimeFieldShare<C::ScalarField>;
+
+    type OtherAcvmType<C: CurveGroup<BaseField = F>> = Rep3AcvmType<C::ScalarField>;
 
     type BrilligDriver = Rep3BrilligDriver<'a, F, N>;
 
@@ -380,7 +389,7 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for Rep3Acvm
                 if cond.is_one() { Ok(truthy) } else { Ok(falsy) }
             }
             (Rep3AcvmType::Shared(cond), truthy, falsy) => {
-                let b_min_a = self.sub(truthy, falsy.clone());
+                let b_min_a = self.sub(truthy, falsy);
                 let d = self.mul(cond.into(), b_min_a)?;
                 Ok(self.add(falsy, d))
             }
@@ -461,7 +470,7 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for Rep3Acvm
         }
     }
 
-    fn sub(&mut self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType {
+    fn sub(&self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType {
         match (share_1, share_2) {
             (Rep3AcvmType::Public(share_1), Rep3AcvmType::Public(share_2)) => {
                 Rep3AcvmType::Public(share_1 - share_2)
@@ -2192,5 +2201,26 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for Rep3Acvm
         let num_outputs = result.len();
         debug_assert_eq!(num_outputs, 1);
         Ok(Rep3AcvmType::Shared(result[0]))
+    }
+    fn pointshare_to_field_shares_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        point: &[Self::AcvmPoint<C>],
+    ) -> eyre::Result<(
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+    )> {
+        todo!()
+    }
+    fn mul_many(
+        &mut self,
+        secrets_1: &[Self::AcvmType],
+        secrets_2: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
+    }
+
+    fn is_zero_many(&mut self, a: &[Self::AcvmType]) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
     }
 }

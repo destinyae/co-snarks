@@ -40,10 +40,15 @@ impl<'a, F: PrimeField, N: Network> ShamirAcvmSolver<'a, F, N> {
 }
 
 // For some intermediate representations
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum ShamirAcvmPoint<C: CurveGroup> {
     Public(C),
     Shared(ShamirPointShare<C>),
+}
+impl<C: CurveGroup> Default for ShamirAcvmPoint<C> {
+    fn default() -> Self {
+        Self::Public(C::zero())
+    }
 }
 
 impl<C: CurveGroup> std::fmt::Debug for ShamirAcvmPoint<C> {
@@ -72,7 +77,7 @@ impl<C: CurveGroup> From<C> for ShamirAcvmPoint<C> {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Copy)]
 pub enum ShamirAcvmType<F: PrimeField> {
     Public(
         #[serde(
@@ -153,6 +158,10 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for ShamirAc
 
     type AcvmType = ShamirAcvmType<F>;
     type AcvmPoint<C: CurveGroup<BaseField = F>> = ShamirAcvmPoint<C>;
+
+    type OtherArithmeticShare<C: CurveGroup<BaseField = F>> = ShamirPrimeFieldShare<C::ScalarField>;
+
+    type OtherAcvmType<C: CurveGroup<BaseField = F>> = ShamirAcvmType<C::ScalarField>;
 
     type BrilligDriver = ShamirBrilligDriver<'a, F, N>;
 
@@ -267,7 +276,7 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for ShamirAc
         }
     }
 
-    fn sub(&mut self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType {
+    fn sub(&self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType {
         match (share_1, share_2) {
             (ShamirAcvmType::Public(share_1), ShamirAcvmType::Public(share_2)) => {
                 ShamirAcvmType::Public(share_1 - share_2)
@@ -939,5 +948,25 @@ impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for ShamirAc
         _output_bitsize: usize,
     ) -> eyre::Result<Self::AcvmType> {
         panic!("functionality accumulate_from_sparse_bytes not feasible for Shamir")
+    }
+    fn pointshare_to_field_shares_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        point: &[Self::AcvmPoint<C>],
+    ) -> eyre::Result<(
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+    )> {
+        todo!()
+    }
+    fn mul_many(
+        &mut self,
+        secrets_1: &[Self::AcvmType],
+        secrets_2: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
+    }
+    fn is_zero_many(&mut self, a: &[Self::AcvmType]) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
     }
 }

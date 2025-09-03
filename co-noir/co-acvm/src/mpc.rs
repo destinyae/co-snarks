@@ -21,16 +21,32 @@ fn downcast<A: 'static, B: 'static>(a: &A) -> Option<&B> {
 pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     type Lookup: LookupTableProvider<F>;
     type ArithmeticShare: Clone;
+    type OtherArithmeticShare<C: CurveGroup<BaseField = F>>: Clone;
     /// A type representing the values encountered during Noir compilation. It should at least contain public field elements and shared values.
     type AcvmType: Clone
         + Default
+        + Copy
         + fmt::Debug
         + fmt::Display
         + From<Self::ArithmeticShare>
         + From<F>
         + PartialEq
         + Into<<Self::BrilligDriver as BrilligDriver<F>>::BrilligType>;
-    type AcvmPoint<C: CurveGroup<BaseField = F>>: Clone + fmt::Debug + fmt::Display + From<C>;
+    type AcvmPoint<C: CurveGroup<BaseField = F>>: Clone
+        + fmt::Debug
+        + fmt::Display
+        + Default
+        + Copy
+        + From<C>;
+
+    type OtherAcvmType<C: CurveGroup<BaseField = F>>: Clone
+        + Default
+        + Copy
+        + fmt::Debug
+        + fmt::Display
+        + From<Self::OtherArithmeticShare<C>>
+        + From<C::ScalarField>
+        + PartialEq;
 
     type BrilligDriver: BrilligDriver<F>;
 
@@ -69,6 +85,23 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     /// Adds two acvm types. Both can either be public or shared
     fn add(&self, lhs: Self::AcvmType, rhs: Self::AcvmType) -> Self::AcvmType;
 
+    /// Adds two acvm types. Both can either be public or shared
+    fn add_other<C: CurveGroup<BaseField = F>>(
+        &self,
+        lhs: Self::OtherAcvmType<C>,
+        rhs: Self::OtherAcvmType<C>,
+    ) -> Self::OtherAcvmType<C> {
+        todo!()
+    }
+
+    /// Elementwise addition of two shares: \[c\] = \[a\] + \[b\]
+    fn add_many(&self, a: &[Self::AcvmType], b: &[Self::AcvmType]) -> Vec<Self::AcvmType> {
+        a.iter()
+            .zip(b.iter())
+            .map(|(a, b)| self.add(a.clone(), b.clone()))
+            .collect()
+    }
+
     /// Adds two acvm points. Both can either be public or shared
     fn add_points<C: CurveGroup<BaseField = F>>(
         &self,
@@ -76,11 +109,51 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         rhs: Self::AcvmPoint<C>,
     ) -> Self::AcvmPoint<C>;
 
+    /// Subs two acvm points. Both can either be public or shared
+    fn sub_points<C: CurveGroup<BaseField = F>>(
+        &self,
+        lhs: Self::AcvmPoint<C>,
+        rhs: Self::AcvmPoint<C>,
+    ) -> Self::AcvmPoint<C> {
+        todo!()
+    }
+
     /// Subtracts two ACVM-type values: secret - secret
-    fn sub(&mut self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType;
+    fn sub(&self, share_1: Self::AcvmType, share_2: Self::AcvmType) -> Self::AcvmType;
+
+    /// Elementwise subtraction of two shares: \[c\] = \[a\] + \[b\]
+    fn sub_many(&self, a: &[Self::AcvmType], b: &[Self::AcvmType]) -> Vec<Self::AcvmType> {
+        a.iter()
+            .zip(b.iter())
+            .map(|(a, b)| self.sub(a.clone(), b.clone()))
+            .collect()
+    }
 
     /// Multiply an ACVM-types with a public value: \[c\] = public * \[secret\].
     fn mul_with_public(&mut self, public: F, secret: Self::AcvmType) -> Self::AcvmType;
+
+    /// Multiply an ACVM-types with a public value: \[c\] = public * \[secret\].
+    fn mul_with_public_other<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        public: C::ScalarField,
+        secret: Self::OtherAcvmType<C>,
+    ) -> Self::OtherAcvmType<C> {
+        todo!()
+    }
+
+    /// Elementwise multiplication a share b by a public value a: c = a * \[b\].
+    fn mul_with_public_many(
+        &mut self,
+        public: &[F],
+        shared: &[Self::AcvmType],
+    ) -> Vec<Self::AcvmType> {
+        debug_assert_eq!(public.len(), shared.len());
+        public
+            .iter()
+            .zip(shared.iter())
+            .map(|(public, shared)| self.mul_with_public(*public, shared.clone()))
+            .collect()
+    }
 
     /// Multiply two ACVM-types: \[c\] = \[secret_1\] * \[secret_2\].
     fn mul(
@@ -88,6 +161,12 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         secret_1: Self::AcvmType,
         secret_2: Self::AcvmType,
     ) -> eyre::Result<Self::AcvmType>;
+
+    fn mul_many(
+        &mut self,
+        secrets_1: &[Self::AcvmType],
+        secrets_2: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<Self::AcvmType>>;
 
     /// Inverts an ACVM-type: \[c\] = \[secret\]^(-1).
     fn invert(&mut self, secret: Self::AcvmType) -> eyre::Result<Self::AcvmType>;
@@ -99,6 +178,36 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     fn solve_linear_term(&mut self, q_l: F, w_l: Self::AcvmType, result: &mut Self::AcvmType);
 
     fn add_assign(&mut self, lhs: &mut Self::AcvmType, rhs: Self::AcvmType);
+
+    /// Adds a public scalar to all elements in-place.
+    fn add_scalar_in_place(&mut self, shared: &mut [Self::AcvmType], scalar: F) {
+        for x in shared.iter_mut() {
+            self.add_assign_with_public(scalar, x);
+        }
+    }
+
+    fn add_scalar(&mut self, shared: &[Self::AcvmType], scalar: F) -> Vec<Self::AcvmType> {
+        //TODO FLORIN
+        let mut res = shared.to_vec();
+        self.add_scalar_in_place(&mut res, scalar);
+        res
+    }
+
+    /// Scales all elements in-place in \[a\] by the provided scale, by multiplying every share with the
+    /// public scalar.
+    fn scale_many_in_place(&mut self, shared: &mut [Self::AcvmType], scale: F) {
+        todo!()
+        // for shared in shared.iter_mut() {
+        //     Self::mul_assign_with_public_basefield(shared, scale);
+        // }
+    }
+
+    fn scale_many(&mut self, shared: &[Self::AcvmType], scale: F) -> Vec<Self::AcvmType> {
+        todo!()
+        // for shared in shared.iter_mut() {
+        //     Self::mul_assign_with_public_basefield(shared, scale);
+        // }
+    }
 
     /// Multiply two acvm-types and a public value and stores them at target: \[*result\] = c * \[lhs\] * \[rhs\].
     fn solve_mul_term(
@@ -193,6 +302,15 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         a: &[Self::AcvmType],
         b: &[Self::AcvmType],
     ) -> eyre::Result<Vec<Self::AcvmType>>;
+
+    fn is_zero_many(&mut self, a: &[Self::AcvmType]) -> eyre::Result<Vec<Self::AcvmType>>;
+
+    fn point_is_zero_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        a: &[Self::AcvmPoint<C>],
+    ) -> eyre::Result<Vec<Self::AcvmType>> {
+        todo!()
+    }
 
     // TODO do we want this here?
     fn open_many(&mut self, a: &[Self::ArithmeticShare]) -> eyre::Result<Vec<F>>;
@@ -441,6 +559,17 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         point: Self::AcvmPoint<C>,
     ) -> eyre::Result<(Self::AcvmType, Self::AcvmType, Self::AcvmType)>;
 
+    /// Translates a share of the point to a share of its coordinates
+    #[expect(clippy::type_complexity)]
+    fn pointshare_to_field_shares_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        point: &[Self::AcvmPoint<C>],
+    ) -> eyre::Result<(
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+        Vec<Self::AcvmType>,
+    )>;
+
     /// Compute the greater than operation: a > b. Outputs 1 if a > b, 0 otherwise.
     fn gt(&mut self, lhs: Self::AcvmType, rhs: Self::AcvmType) -> eyre::Result<Self::AcvmType>;
 
@@ -504,4 +633,25 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         input_bitsize: usize,
         output_bitsize: usize,
     ) -> eyre::Result<Self::AcvmType>;
+
+    fn scalar_mul_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        a: &[Self::AcvmPoint<C>],
+        b: &[Self::OtherAcvmType<C>],
+    ) -> Vec<Self::AcvmPoint<C>> {
+        todo!()
+    }
+    fn scalar_mul_public_scalar<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        point: Self::AcvmPoint<C>,
+        scalar: C::ScalarField,
+    ) -> Self::AcvmPoint<C> {
+        todo!()
+    }
+    // This is brittle, intended to to be used for conversions of binary shares
+    fn convert_fields<C: CurveGroup<BaseField = F>>(
+        a: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<Self::OtherAcvmType<C>>> {
+        todo!()
+    }
 }

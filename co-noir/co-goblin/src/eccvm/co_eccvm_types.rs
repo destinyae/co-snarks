@@ -1,11 +1,13 @@
 use crate::eccvm::co_ecc_op_queue::{
     CoECCOpQueue, CoEccvmOpsTable, CoEccvmRowTracker, CoUltraEccOpsTable, CoUltraOp, CoVMOperation,
 };
+use crate::eccvm::co_ecc_op_queue::{MSMRow, ScalarMul};
 use ark_ec::AffineRepr;
 use ark_ec::CurveGroup;
 use ark_ff::One;
 use ark_ff::PrimeField;
 use ark_ff::Zero;
+use co_acvm::mpc::NoirWitnessExtensionProtocol;
 use co_builder::flavours::eccvm_flavour::ECCVMFlavour;
 use co_builder::prelude::NUM_DISABLED_ROWS_IN_SUMCHECK;
 use co_builder::prelude::NUM_TRANSLATION_EVALUATIONS;
@@ -25,6 +27,8 @@ use common::{
     mpc::NoirUltraHonkProver,
     transcript::{Transcript, TranscriptFieldType, TranscriptHasher},
 };
+use goblin::{NUM_WNAF_DIGIT_BITS, NUM_WNAF_DIGITS_PER_SCALAR};
+use goblin::{POINT_TABLE_SIZE, WNAF_DIGITS_PER_ROW};
 use mpc_core::MpcState;
 use mpc_net::Network;
 use num_bigint::BigUint;
@@ -70,7 +74,7 @@ impl<T: NoirUltraHonkProver<P>, P: HonkCurve<TranscriptFieldType>> SharedTransla
 
         // Concatenate the last entries of the `translation_polynomials`.
 
-        translation_data.compute_concatenated_polynomials(transcript_polynomials, net, state);
+        translation_data.compute_concatenated_polynomials(transcript_polynomials, net, state)?;
 
         // Commit to M(X) + Z_H(X)*R(X), where R is a random polynomial of WITNESS_MASKING_TERM_LENGTH.
         let commitment = CoUtils::commit::<T, P>(
@@ -201,15 +205,17 @@ impl<T: NoirUltraHonkProver<P>, P: HonkCurve<TranscriptFieldType>> SharedTransla
     }
 }
 
-struct CoVMState<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> {
-    pc: T::BaseFieldArithmeticShare,
-    count: T::BaseFieldArithmeticShare,
-    accumulator: T::PointShare,
-    msm_accumulator: T::PointShare,
-    is_accumulator_empty: T::BaseFieldArithmeticShare, //bool
+struct CoVMState<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseField>> {
+    pc: T::AcvmType,
+    count: T::AcvmType,
+    accumulator: T::AcvmPoint<C>,
+    msm_accumulator: T::AcvmPoint<C>,
+    is_accumulator_empty: T::AcvmType, //bool
 }
 
-impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> Clone for CoVMState<C, T> {
+impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseField>> Clone
+    for CoVMState<C, T>
+{
     fn clone(&self) -> Self {
         Self {
             pc: self.pc,
@@ -220,128 +226,90 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> Clone for CoV
         }
     }
 }
-impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> CoVMState<C, T> {
-    fn new(id: <T::State as MpcState>::PartyID) -> Self {
+impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseField>>
+    CoVMState<C, T>
+{
+    fn new() -> Self {
         Self {
-            pc: T::BaseFieldArithmeticShare::default(),
-            count: T::BaseFieldArithmeticShare::default(),
-            accumulator: T::PointShare::default(),
-            msm_accumulator: T::promote_to_trivial_point_share(
-                id,
-                offset_generator_scaled::<C>().into(),
-            ),
-            is_accumulator_empty: T::promote_to_trivial_share_basefield(id, C::BaseField::one()), //true
+            pc: T::AcvmType::default(),
+            count: T::AcvmType::default(),
+            accumulator: T::AcvmPoint::<C>::default(),
+            msm_accumulator: T::AcvmPoint::from(offset_generator_scaled::<C>().into()),
+            is_accumulator_empty: T::AcvmType::from(C::BaseField::one()), //true
         }
     }
 
-    fn process_mul<N: Network>(
+    fn process_mul(
         entry: &CoVMOperation<T, C>,
         updated_state: &mut CoVMState<C, T>,
         state: &CoVMState<C, T>,
-        net: &N,
-        state_: &mut T::State,
+        driver: &mut T,
     ) {
+        // TODO FLORIN
         let p = entry.base_point;
         let r = state.msm_accumulator;
         //TACEO TODO Can we batch these scalar muls?
-        let mul = T::scalar_mul(&p, entry.mul_scalar_full, net, state_);
-        updated_state.msm_accumulator = T::point_add(&r, &mul);
+        let mul = driver.scalar_mul_many(&[p], &[entry.mul_scalar_full])[0];
+        updated_state.msm_accumulator = driver.add_points(r, mul);
     }
 
-    fn process_add<N: Network>(
+    fn process_add(
         entry: &CoVMOperation<T, C>,
         updated_state: &mut CoVMState<C, T>,
         old_state: &CoVMState<C, T>,
-        is_accumulator_empty: T::ArithmeticShare,
-        net: &N,
-        state_: &mut T::State,
+        is_accumulator_empty: T::OtherAcvmType<C>,
+        driver: &mut T,
     ) -> eyre::Result<()> {
-        let inv = T::add_with_public(
-            C::ScalarField::one(),
-            T::mul_with_public(-C::ScalarField::one(), is_accumulator_empty),
-            state_.id(),
-        );
-        let other = T::point_add(&old_state.accumulator, &entry.base_point);
-        let mul = T::scalar_mul_many(
-            &[entry.base_point, other],
-            &[is_accumulator_empty, inv],
-            net,
-            state_,
-        );
-        let result = T::point_add(&mul[0], &mul[1]);
-        updated_state.accumulator = result.into();
-        // if old_state.is_accumulator_empty {
-        //     updated_state.accumulator = entry.base_point;
-        // } else {
-        //     updated_state.accumulator = (old_state.accumulator + entry.base_point).into();
-        // }
+        // TODO FLORIN
+        let mul = driver.mul_with_public_other(-C::ScalarField::one(), is_accumulator_empty);
+        let inv = driver.add_other(T::OtherAcvmType::from(C::ScalarField::one()), mul);
+        let other = driver.add_points(old_state.accumulator, entry.base_point);
+        let mul = driver.scalar_mul_many(&[entry.base_point, other], &[is_accumulator_empty, inv]);
+        let result = driver.add_points(mul[0], mul[1]);
+        updated_state.accumulator = result;
 
         updated_state.is_accumulator_empty =
-            T::point_is_zero_many(&[updated_state.accumulator], net, state_)?[0];
+            driver.point_is_zero_many(&[updated_state.accumulator])?[0];
         Ok(())
     }
 
     // TODO FLORIN: explain what is going on here
-    fn process_msm_transition<N: Network>(
+    fn process_msm_transition(
         row: &mut CoTranscriptRow<C, T>,
         updated_state: &mut CoVMState<C, T>,
         old_state: &CoVMState<C, T>,
-        is_accumulator_empty: T::ArithmeticShare,
-        msm_transition_is_zero: T::ArithmeticShare,
-        net: &N,
-        state_: &mut T::State,
+        is_accumulator_empty: T::OtherAcvmType<C>,
+        msm_transition_is_zero: T::OtherAcvmType<C>,
+        driver: &mut T,
     ) -> eyre::Result<()> {
-        let inv = T::add_with_public(
-            C::ScalarField::one(),
-            T::mul_with_public(-C::ScalarField::one(), is_accumulator_empty),
-            state_.id(),
+        //TODO FLORIN
+        let mul = driver.mul_with_public_other(-C::ScalarField::one(), is_accumulator_empty);
+        let inv = driver.add_other(T::OtherAcvmType::from(C::ScalarField::one()), mul);
+        let if_value = driver.add_points(
+            updated_state.msm_accumulator,
+            T::AcvmPoint::from(-offset_generator_scaled::<C>().into()),
         );
-        let if_value = T::point_add(
-            &updated_state.msm_accumulator,
-            &T::promote_to_trivial_point_share(state_.id(), -offset_generator_scaled::<C>().into()),
+        let mut else_value =
+            driver.add_points(old_state.accumulator, updated_state.msm_accumulator);
+        else_value = driver.add_points(
+            else_value,
+            T::AcvmPoint::from(-offset_generator_scaled::<C>().into()),
         );
-        let mut else_value = T::point_add(&old_state.accumulator, &updated_state.msm_accumulator);
-        else_value = T::point_add(
-            &else_value,
-            &T::promote_to_trivial_point_share(state_.id(), -offset_generator_scaled::<C>().into()),
-        );
-        let mul = T::scalar_mul_many(
-            &[if_value, else_value],
-            &[is_accumulator_empty, inv],
-            net,
-            state_,
-        );
-        let result = T::point_add(&mul[0], &mul[1]);
-        let mul = T::scalar_mul(
-            &T::point_sub(&result, &updated_state.accumulator),
-            msm_transition_is_zero,
-            net,
-            state_,
-        );
-        updated_state.accumulator = T::point_add(&updated_state.accumulator, &mul);
+        let mul = driver.scalar_mul_many(&[if_value, else_value], &[is_accumulator_empty, inv]);
+        let result = driver.add_points(mul[0], mul[1]);
+        let mul = driver.scalar_mul_many(
+            &[driver.sub_points(result, updated_state.accumulator)],
+            &[msm_transition_is_zero],
+        )[0];
+        updated_state.accumulator = driver.add_points(updated_state.accumulator, mul);
 
-        // if old_state.is_accumulator_empty {
-        //     updated_state.accumulator = (updated_state.msm_accumulator
-        //         - T::promote_to_trivial_point_share(
-        //             state_.id(),
-        //             offset_generator_scaled::<C>().into(),
-        //         ))
-        //     .into();
-        // } else {
-        //     let r = old_state.accumulator;
-        //     updated_state.accumulator = (r + updated_state.msm_accumulator
-        //         - T::promote_to_trivial_point_share(
-        //             state_.id(),
-        //             offset_generator_scaled::<C>().into(),
-        //         ))
-        //     .into();
-        // }
-        let msm_output = T::point_sub(
-            &updated_state.msm_accumulator,
-            &T::promote_to_trivial_point_share(state_.id(), offset_generator_scaled::<C>().into()),
+        let msm_output = driver.sub_points(
+            updated_state.msm_accumulator,
+            T::AcvmPoint::from(offset_generator_scaled::<C>().into()),
         );
-        let is_zero = T::point_is_zero_many(&[msm_output, updated_state.accumulator], net, state_)?;
+        let is_zero = driver.point_is_zero_many(&[msm_output, updated_state.accumulator])?;
 
+        //TODO FLORIN MAYBE WE NEED TO MULTIPLY THIS STILL WITH msm_transition_is_zero
         updated_state.is_accumulator_empty = is_zero[1];
 
         //TACEO TODO: Batch this is_zero check with others
@@ -349,14 +317,13 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> CoVMState<C, 
         Ok(())
     }
 
-    fn populate_transcript_row<N: Network>(
+    fn populate_transcript_row(
         row: &mut CoTranscriptRow<C, T>,
-        base_point_infinity: T::BaseFieldArithmeticShare,
+        base_point_infinity: T::AcvmType,
         entry: &CoVMOperation<T, C>,
         state: &CoVMState<C, T>,
-        msm_transition: T::BaseFieldArithmeticShare,
-        net: &N,
-        state_: &mut T::State,
+        msm_transition: T::AcvmType,
+        driver: &mut T,
     ) -> eyre::Result<()> {
         row.accumulator_empty = state.is_accumulator_empty;
         row.q_add = entry.op_code.add;
@@ -369,14 +336,14 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> CoVMState<C, 
         // row.msm_count_zero_at_transition =
         // (state.count + num_muls == 0) && entry.op_code.mul && next_not_msm; // We do this already outside of the function
         //TACEO TODO Batch this function
-        let points = T::pointshare_to_field_shares(entry.base_point, net, state_)?;
+        let points = driver.pointshare_to_field_shares(entry.base_point)?;
 
         if entry.op_code.add || entry.op_code.mul || entry.op_code.eq {
-            let mut inv = T::mul_with_public_basefield(-C::BaseField::one(), base_point_infinity);
-            T::add_assign_public_basefield(&mut inv, C::BaseField::one(), state_.id());
-            let mul = T::mul_many_basefield(&[points.0, points.1], &[inv, inv], net, state_)?;
-            row.base_x = mul[0];
-            row.base_y = mul[1];
+            let mut inv = driver.mul_with_public(-C::BaseField::one(), base_point_infinity);
+            driver.add_assign_with_public(C::BaseField::one(), &mut inv);
+            let mul = driver.mul_many(&[points.0, points.1], &[inv, inv])?;
+            row.base_x = mul[0].to_owned();
+            row.base_y = mul[1].to_owned();
         }
         // row.base_x = if (entry.op_code.add || entry.op_code.mul || entry.op_code.eq)
         //     && !base_point_infinity
@@ -401,17 +368,17 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> CoVMState<C, 
         row.base_infinity = if entry.op_code.add || entry.op_code.mul || entry.op_code.eq {
             base_point_infinity
         } else {
-            T::promote_to_trivial_share_basefield(state_.id(), C::BaseField::zero())
+            T::AcvmType::from(C::BaseField::zero())
         };
         row.z1 = if entry.op_code.mul {
-            entry.z1.clone()
+            entry.z1
         } else {
-            T::BaseFieldArithmeticShare::default()
+            T::AcvmType::default()
         };
         row.z2 = if entry.op_code.mul {
-            entry.z2.clone()
+            entry.z2
         } else {
-            T::BaseFieldArithmeticShare::default()
+            T::AcvmType::default()
         };
         // row.z1_zero = entry.z1.is_zero(); // We do this already outside of the function
         // row.z2_zero = entry.z2.is_zero(); // We do this already outside of the function
@@ -422,27 +389,23 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> CoVMState<C, 
 
 fn add_affine_coordinates_to_transcript<
     C: HonkCurve<TranscriptFieldType>,
-    T: NoirUltraHonkProver<C>,
-    N: Network,
+    T: NoirWitnessExtensionProtocol<C::BaseField>,
 >(
     transcript_state: &mut [CoTranscriptRow<C, T>],
-    accumulator_trace: &[T::PointShare],
-    msm_accumulator_trace: &[T::PointShare],
-    intermediate_accumulator_trace: &[T::PointShare],
-    net: &N,
-    state_: &mut T::State,
+    accumulator_trace: &[T::AcvmPoint<C>],
+    msm_accumulator_trace: &[T::AcvmPoint<C>],
+    intermediate_accumulator_trace: &[T::AcvmPoint<C>],
+    driver: &mut T,
 ) -> eyre::Result<()> {
-    let (xs, ys, _) = T::pointshare_to_field_shares_many(
+    let (xs, ys, _) = driver.pointshare_to_field_shares_many(
         &[
             accumulator_trace,
             msm_accumulator_trace,
             intermediate_accumulator_trace,
         ]
         .concat(),
-        net,
-        state_,
     )?;
-    //TODO FLORIN: check sizes
+
     let len_acc = accumulator_trace.len();
     let len_msm = msm_accumulator_trace.len();
     let (acc_xs, rest) = xs.split_at(len_acc);
@@ -458,30 +421,6 @@ fn add_affine_coordinates_to_transcript<
         row.msm_output_y = msm_ys[i];
         row.transcript_msm_intermediate_x = int_xs[i];
         row.transcript_msm_intermediate_y = int_ys[i];
-        // if !accumulator_trace[i].is_zero() {
-        //     row.accumulator_x = accumulator_trace[i]
-        //         .x()
-        //         .expect("Accumulator x-coordinate should not be zero");
-        //     row.accumulator_y = accumulator_trace[i]
-        //         .y()
-        //         .expect("Accumulator y-coordinate should not be zero");
-        // }
-        // if !msm_accumulator_trace[i].is_zero() {
-        //     row.msm_output_x = msm_accumulator_trace[i]
-        //         .x()
-        //         .expect("MSM accumulator x-coordinate should not be zero");
-        //     row.msm_output_y = msm_accumulator_trace[i]
-        //         .y()
-        //         .expect("MSM accumulator y-coordinate should not be zero");
-        // }
-        // if !intermediate_accumulator_trace[i].is_zero() {
-        //     row.transcript_msm_intermediate_x = intermediate_accumulator_trace[i]
-        //         .x()
-        //         .expect("Intermediate accumulator x-coordinate should not be zero");
-        //     row.transcript_msm_intermediate_y = intermediate_accumulator_trace[i]
-        //         .y()
-        //         .expect("Intermediate accumulator y-coordinate should not be zero");
-        // }
     }
     Ok(())
 }
@@ -489,61 +428,47 @@ fn add_affine_coordinates_to_transcript<
 #[expect(clippy::too_many_arguments)]
 fn compute_inverse_trace_coordinates<
     C: HonkCurve<TranscriptFieldType>,
-    T: NoirUltraHonkProver<C>,
-    N: Network,
+    T: NoirWitnessExtensionProtocol<C::BaseField>,
 >(
-    msm_transition: T::BaseFieldArithmeticShare,
+    msm_transition: T::AcvmType,
     row: &CoTranscriptRow<C, T>,
-    intermediate_accumulator_trace_x: T::BaseFieldArithmeticShare,
-    intermediate_accumulator_trace_y: T::BaseFieldArithmeticShare,
-    transcript_msm_x_inverse_trace: &mut T::BaseFieldArithmeticShare,
-    msm_accumulator_trace_x: T::BaseFieldArithmeticShare,
-    msm_accumulator_trace_infinity: T::BaseFieldArithmeticShare,
-    accumulator_trace_x: T::BaseFieldArithmeticShare,
-    accumulator_trace_y: T::BaseFieldArithmeticShare,
-    inverse_trace_x: &mut T::BaseFieldArithmeticShare,
-    inverse_trace_y: &mut T::BaseFieldArithmeticShare,
-    net: &N,
-    state_: &mut T::State,
+    intermediate_accumulator_trace_x: T::AcvmType,
+    intermediate_accumulator_trace_y: T::AcvmType,
+    transcript_msm_x_inverse_trace: &mut T::AcvmType,
+    msm_accumulator_trace_x: T::AcvmType,
+    msm_accumulator_trace_infinity: T::AcvmType,
+    accumulator_trace_x: T::AcvmType,
+    accumulator_trace_y: T::AcvmType,
+    inverse_trace_x: &mut T::AcvmType,
+    inverse_trace_y: &mut T::AcvmType,
+    driver: &mut T,
 ) -> eyre::Result<()> {
     // let msm_output_infinity = intermediate_accumulator_trace.is_zero();
     let row_msm_infinity = row.transcript_msm_infinity;
     //TODO FLORIN: can do this over scalarfield also and remove some of these functions
-    let inv_row_msm_infinity = T::add_with_public_basefield(
-        C::BaseField::one(),
-        T::mul_with_public_basefield(-C::BaseField::one(), row_msm_infinity),
-        state_.id(),
-    );
+    let mul = driver.mul_with_public(-C::BaseField::one(), row_msm_infinity);
+    let inv_row_msm_infinity = driver.add(T::AcvmType::from(C::BaseField::one()), mul);
 
-    let inv_accumulator_trace_infinity = T::add_with_public_basefield(
-        C::BaseField::one(),
-        T::mul_with_public_basefield(-C::BaseField::one(), msm_accumulator_trace_infinity),
-        state_.id(),
-    );
+    let mul = driver.mul_with_public(-C::BaseField::one(), msm_accumulator_trace_infinity);
+    let inv_accumulator_trace_infinity = driver.add(T::AcvmType::from(C::BaseField::one()), mul);
 
     let bb_infinity_default =
-        T::mul_with_public_basefield(C::get_bb_infinity_default(), msm_accumulator_trace_infinity);
+        driver.mul_with_public(C::get_bb_infinity_default(), msm_accumulator_trace_infinity);
 
-    let mul = T::mul_many_basefield(
+    let mul = driver.mul_many(
         &[msm_accumulator_trace_x],
         &[inv_accumulator_trace_infinity],
-        net,
-        state_,
     )?;
-    let mut result = T::add_basefield(mul[0], bb_infinity_default);
-    T::add_assign_public_basefield(
-        &mut result,
+    let mut result = driver.add(mul[0].to_owned(), bb_infinity_default);
+    driver.add_assign_with_public(
         -offset_generator_scaled::<C>()
             .x()
             .expect("Offset generator x-coordinate should not be zero"),
-        state_.id(),
+        &mut result,
     );
-    let inv_msm_transition = T::add_with_public_basefield(
-        C::BaseField::one(),
-        T::mul_with_public_basefield(-C::BaseField::one(), msm_transition),
-        state_.id(),
-    );
-    let mul = T::mul_many_basefield(
+    let mul = driver.mul_with_public(-C::BaseField::one(), msm_transition);
+    let inv_msm_transition = driver.add(T::AcvmType::from(C::BaseField::one()), mul);
+    let mul = driver.mul_many(
         &[
             result,
             msm_transition,
@@ -558,176 +483,116 @@ fn compute_inverse_trace_coordinates<
             row.base_x,
             row.base_y,
         ],
-        net,
-        state_,
     )?;
 
-    *transcript_msm_x_inverse_trace =
-        T::mul_many_basefield(&[result], &[inv_row_msm_infinity], net, state_)?[0];
+    *transcript_msm_x_inverse_trace = driver.mul(result, inv_row_msm_infinity)?;
 
-    let res_x = T::add_basefield(mul[1], mul[3]);
-    let res_y = T::add_basefield(mul[2], mul[4]);
-
-    // if row_msm_infinity {
-    //     C::BaseField::zero()
-    // } else {
-    //     msm_accumulator_trace
-    //         .x()
-    //         .unwrap_or(C::get_bb_infinity_default())
-    //         - offset_generator_scaled::<C>()
-    //             .x()
-    //             .expect("Offset generator x-coordinate should not be zero")
-    // };
+    let res_x = driver.add(mul[1], mul[3]);
+    let res_y = driver.add(mul[2], mul[4]);
 
     let (lhsx, lhsy) = (res_x, res_y);
 
     let (rhsx, rhsy) = (accumulator_trace_x, accumulator_trace_y);
 
-    *inverse_trace_x = T::sub_basefield(lhsx, rhsx); //lhsx - rhsx;
-    *inverse_trace_y = T::sub_basefield(lhsy, rhsy); //lhsy - rhsy;
+    *inverse_trace_x = driver.add(lhsx, rhsx); //lhsx - rhsx;
+    *inverse_trace_y = driver.add(lhsy, rhsy); //lhsy - rhsy;
 
     Ok(())
 }
 
-#[expect(clippy::too_many_arguments)]
-fn compute_lambda_numerator_and_denominator<
+struct CoTranscriptRow<
     C: HonkCurve<TranscriptFieldType>,
-    T: NoirUltraHonkProver<C>,
-    N: Network,
->(
-    row: &mut CoTranscriptRow<C, T>,
-    entry: &CoVMOperation<T, C>,
-    intermediate_accumulator_trace: &T::PointShare,
-    accumulator_trace: &T::PointShare,
-    accumulator_trace_x: T::BaseFieldArithmeticShare,
-    accumulator_trace_y: T::BaseFieldArithmeticShare,
-    accumulator_trace_infinity: T::BaseFieldArithmeticShare,
-    add_lambda_numerator: &mut T::BaseFieldArithmeticShare,
-    add_lambda_denominator: &mut T::BaseFieldArithmeticShare,
-    vm_point_x: T::BaseFieldArithmeticShare,
-    vm_point_y: T::BaseFieldArithmeticShare,
-    vm_infinity: T::BaseFieldArithmeticShare,
-    net: &N,
-    state_: &mut T::State,
-) {
-    let vm_point = if entry.op_code.add {
-        entry.base_point
-    } else {
-        *intermediate_accumulator_trace
-    };
-
-    // let vm_infinity = vm_point.is_zero();
-    // let accumulator_infinity = accumulator_trace.is_zero();
-
-    let vm_x = vm_point_x;
-    let vm_y = vm_point_y;
-
-    let accumulator_x = accumulator_trace_x;
-    let accumulator_y = accumulator_trace_y;
-
-    // We do this outside of the function
-    // row.transcript_add_x_equal = (vm_x == accumulator_x) || (vm_infinity && accumulator_infinity);
-    // row.transcript_add_y_equal = (vm_y == accumulator_y) || (vm_infinity && accumulator_infinity);
-
-    todo!("Check if we can avoid some of these multiplications");
-    // if (accumulator_x == vm_x) && (accumulator_y == vm_y) && !vm_infinity && !accumulator_infinity {
-    //     *add_lambda_denominator = vm_y + vm_y;
-    //     *add_lambda_numerator = vm_x * vm_x * C::BaseField::from(3u32);
-    // } else if (accumulator_x != vm_x) && !vm_infinity && !accumulator_infinity {
-    //     *add_lambda_denominator = accumulator_x - vm_x;
-    //     *add_lambda_numerator = accumulator_y - vm_y;
-    // }
-}
-
-struct CoTranscriptRow<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> {
-    transcript_msm_infinity: T::BaseFieldArithmeticShare, //bool
-    accumulator_empty: T::BaseFieldArithmeticShare,
+    T: NoirWitnessExtensionProtocol<C::BaseField>,
+> {
+    transcript_msm_infinity: T::AcvmType, //bool
+    accumulator_empty: T::AcvmType,
     q_add: bool,
     q_mul: bool,
     q_eq: bool,
     q_reset_accumulator: bool,
-    msm_transition: T::BaseFieldArithmeticShare,
-    pc: T::BaseFieldArithmeticShare,
-    msm_count: T::BaseFieldArithmeticShare,
-    msm_count_zero_at_transition: T::BaseFieldArithmeticShare,
-    base_x: T::BaseFieldArithmeticShare,
-    base_y: T::BaseFieldArithmeticShare,
-    base_infinity: T::BaseFieldArithmeticShare,
-    z1: T::BaseFieldArithmeticShare,
-    z2: T::BaseFieldArithmeticShare,
-    z1_zero: T::BaseFieldArithmeticShare,
-    z2_zero: T::BaseFieldArithmeticShare,
+    msm_transition: T::AcvmType,
+    pc: T::AcvmType,
+    msm_count: T::AcvmType,
+    msm_count_zero_at_transition: T::AcvmType,
+    base_x: T::AcvmType,
+    base_y: T::AcvmType,
+    base_infinity: T::AcvmType,
+    z1: T::AcvmType,
+    z2: T::AcvmType,
+    z1_zero: T::AcvmType,
+    z2_zero: T::AcvmType,
     opcode: u32,
 
-    accumulator_x: T::BaseFieldArithmeticShare,
-    accumulator_y: T::BaseFieldArithmeticShare,
-    msm_output_x: T::BaseFieldArithmeticShare,
-    msm_output_y: T::BaseFieldArithmeticShare,
-    transcript_msm_intermediate_x: T::BaseFieldArithmeticShare,
-    transcript_msm_intermediate_y: T::BaseFieldArithmeticShare,
+    accumulator_x: T::AcvmType,
+    accumulator_y: T::AcvmType,
+    msm_output_x: T::AcvmType,
+    msm_output_y: T::AcvmType,
+    transcript_msm_intermediate_x: T::AcvmType,
+    transcript_msm_intermediate_y: T::AcvmType,
 
-    transcript_add_x_equal: T::BaseFieldArithmeticShare,
-    transcript_add_y_equal: T::BaseFieldArithmeticShare,
+    transcript_add_x_equal: T::AcvmType,
+    transcript_add_y_equal: T::AcvmType,
 
-    base_x_inverse: T::BaseFieldArithmeticShare,
-    base_y_inverse: T::BaseFieldArithmeticShare,
-    transcript_add_lambda: T::BaseFieldArithmeticShare,
-    transcript_msm_x_inverse: T::BaseFieldArithmeticShare,
-    msm_count_at_transition_inverse: T::BaseFieldArithmeticShare,
+    base_x_inverse: T::AcvmType,
+    base_y_inverse: T::AcvmType,
+    transcript_add_lambda: T::AcvmType,
+    transcript_msm_x_inverse: T::AcvmType,
+    msm_count_at_transition_inverse: T::AcvmType,
 }
 
-impl<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>> Default
+impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseField>> Default
     for CoTranscriptRow<C, T>
 {
     fn default() -> Self {
         Self {
-            transcript_msm_infinity: T::BaseFieldArithmeticShare::default(),
-            accumulator_empty: T::BaseFieldArithmeticShare::default(),
+            transcript_msm_infinity: T::AcvmType::default(),
+            accumulator_empty: T::AcvmType::default(),
             q_add: false,
             q_mul: false,
             q_eq: false,
             q_reset_accumulator: false,
-            msm_transition: T::BaseFieldArithmeticShare::default(),
-            pc: T::BaseFieldArithmeticShare::default(),
-            msm_count: T::BaseFieldArithmeticShare::default(),
-            msm_count_zero_at_transition: T::BaseFieldArithmeticShare::default(),
-            base_x: T::BaseFieldArithmeticShare::default(),
-            base_y: T::BaseFieldArithmeticShare::default(),
-            base_infinity: T::BaseFieldArithmeticShare::default(),
-            z1: T::BaseFieldArithmeticShare::default(),
-            z2: T::BaseFieldArithmeticShare::default(),
-            z1_zero: T::BaseFieldArithmeticShare::default(),
-            z2_zero: T::BaseFieldArithmeticShare::default(),
+            msm_transition: T::AcvmType::default(),
+            pc: T::AcvmType::default(),
+            msm_count: T::AcvmType::default(),
+            msm_count_zero_at_transition: T::AcvmType::default(),
+            base_x: T::AcvmType::default(),
+            base_y: T::AcvmType::default(),
+            base_infinity: T::AcvmType::default(),
+            z1: T::AcvmType::default(),
+            z2: T::AcvmType::default(),
+            z1_zero: T::AcvmType::default(),
+            z2_zero: T::AcvmType::default(),
             opcode: 0,
-            accumulator_x: T::BaseFieldArithmeticShare::default(),
-            accumulator_y: T::BaseFieldArithmeticShare::default(),
-            msm_output_x: T::BaseFieldArithmeticShare::default(),
-            msm_output_y: T::BaseFieldArithmeticShare::default(),
-            transcript_msm_intermediate_x: T::BaseFieldArithmeticShare::default(),
-            transcript_msm_intermediate_y: T::BaseFieldArithmeticShare::default(),
-            transcript_add_x_equal: T::BaseFieldArithmeticShare::default(),
-            transcript_add_y_equal: T::BaseFieldArithmeticShare::default(),
-            base_x_inverse: T::BaseFieldArithmeticShare::default(),
-            base_y_inverse: T::BaseFieldArithmeticShare::default(),
-            transcript_add_lambda: T::BaseFieldArithmeticShare::default(),
-            transcript_msm_x_inverse: T::BaseFieldArithmeticShare::default(),
-            msm_count_at_transition_inverse: T::BaseFieldArithmeticShare::default(),
+            accumulator_x: T::AcvmType::default(),
+            accumulator_y: T::AcvmType::default(),
+            msm_output_x: T::AcvmType::default(),
+            msm_output_y: T::AcvmType::default(),
+            transcript_msm_intermediate_x: T::AcvmType::default(),
+            transcript_msm_intermediate_y: T::AcvmType::default(),
+            transcript_add_x_equal: T::AcvmType::default(),
+            transcript_add_y_equal: T::AcvmType::default(),
+            base_x_inverse: T::AcvmType::default(),
+            base_y_inverse: T::AcvmType::default(),
+            transcript_add_lambda: T::AcvmType::default(),
+            transcript_msm_x_inverse: T::AcvmType::default(),
+            msm_count_at_transition_inverse: T::AcvmType::default(),
         }
     }
 }
 
-fn finalize_transcript<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N: Network>(
+fn finalize_transcript<
+    C: HonkCurve<TranscriptFieldType>,
+    T: NoirWitnessExtensionProtocol<C::BaseField>,
+>(
     updated_state: &CoVMState<C, T>,
-    net: &N,
-    state_: &mut T::State,
+    driver: &mut T,
 ) -> eyre::Result<CoTranscriptRow<C, T>>
 where
     <C as CurveGroup>::BaseField: PrimeField,
 {
     let mut final_row = CoTranscriptRow::<C, T>::default();
 
-    let (result_x, result_y, _) =
-        T::pointshare_to_field_shares(updated_state.accumulator, net, state_)?; //TODO FLORIN: batch this outside?
+    let (result_x, result_y, _) = driver.pointshare_to_field_shares(updated_state.accumulator)?; //TODO FLORIN: batch this outside?
 
     final_row.accumulator_x = result_x;
     final_row.accumulator_y = result_y;
@@ -737,13 +602,15 @@ where
     Ok(final_row)
 }
 
-fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N: Network>(
+fn compute_rows<
+    C: HonkCurve<TranscriptFieldType>,
+    T: NoirWitnessExtensionProtocol<C::BaseField>,
+>(
     vm_operations: &[CoVMOperation<T, C>],
-    total_number_of_muls: T::BaseFieldArithmeticShare,
-    net: &N,
-    state_: &mut T::State,
+    total_number_of_muls: T::AcvmType,
+    driver: &mut T,
 ) -> eyre::Result<Vec<CoTranscriptRow<C, T>>> {
-    // TODO FLORIN: REPLACE WITH CMUXES
+    // TODO FLORIN: REPLACE WITH CMUXES where possible
 
     let num_vm_entries = vm_operations.len();
     // The transcript contains an extra zero row at the beginning and the accumulated state at the end
@@ -752,34 +619,25 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
 
     // These vectors track quantities that we need to invert.
     // We fill these vectors and then perform batch inversions to amortize the cost of FF inverts
-    let mut inverse_trace_x = vec![T::BaseFieldArithmeticShare::default(); num_vm_entries];
-    let mut inverse_trace_y = vec![T::BaseFieldArithmeticShare::default(); num_vm_entries];
-    let mut transcript_msm_x_inverse_trace =
-        vec![T::BaseFieldArithmeticShare::default(); num_vm_entries];
-    let mut add_lambda_denominator = vec![T::BaseFieldArithmeticShare::default(); num_vm_entries];
-    let mut add_lambda_numerator = vec![T::BaseFieldArithmeticShare::default(); num_vm_entries];
-    let mut msm_count_at_transition_inverse_trace =
-        vec![T::BaseFieldArithmeticShare::default(); num_vm_entries];
+    let mut inverse_trace_x = vec![T::AcvmType::default(); num_vm_entries];
+    let mut inverse_trace_y = vec![T::AcvmType::default(); num_vm_entries];
+    let mut transcript_msm_x_inverse_trace = vec![T::AcvmType::default(); num_vm_entries];
+    let mut msm_count_at_transition_inverse_trace = vec![T::AcvmType::default(); num_vm_entries];
 
-    let mut msm_accumulator_trace: Vec<_> = vec![T::PointShare::default(); num_vm_entries];
-    let mut accumulator_trace: Vec<_> = vec![T::PointShare::default(); num_vm_entries];
-    let mut intermediate_accumulator_trace: Vec<_> = vec![T::PointShare::default(); num_vm_entries];
+    let mut msm_accumulator_trace: Vec<_> = vec![T::AcvmPoint::<C>::default(); num_vm_entries];
+    let mut accumulator_trace: Vec<_> = vec![T::AcvmPoint::<C>::default(); num_vm_entries];
+    let mut intermediate_accumulator_trace: Vec<_> =
+        vec![T::AcvmPoint::<C>::default(); num_vm_entries];
 
     let mut state = CoVMState::<C, T> {
         pc: total_number_of_muls,
-        count: T::BaseFieldArithmeticShare::default(),
-        accumulator: T::PointShare::default(),
-        msm_accumulator: T::promote_to_trivial_point_share(
-            state_.id(),
-            offset_generator_scaled::<C>().into(),
-        ),
-        is_accumulator_empty: T::promote_to_trivial_share_basefield(
-            state_.id(),
-            C::BaseField::one(),
-        ), //true
+        count: T::AcvmType::default(),
+        accumulator: T::AcvmPoint::<C>::default(),
+        msm_accumulator: T::AcvmPoint::<C>::from(offset_generator_scaled::<C>().into()),
+        is_accumulator_empty: T::AcvmType::from(C::BaseField::one()), //true
     };
 
-    let mut updated_state = CoVMState::<C, T>::new(state_.id());
+    let mut updated_state = CoVMState::<C, T>::new();
 
     // add an empty row. 1st row all zeroes because of our shiftable polynomials
     transcript_state.push(CoTranscriptRow::<C, T>::default());
@@ -788,38 +646,33 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     // coordinates and the base point coordinates are recorded in the transcript. at the same time, the transcript
     // logic is being populated
 
-    let mut base_points = Vec::new(); // TODO FLORIN
-    let mut entry_z1 = Vec::new(); // TODO FLORIN
-    let mut entry_z2 = Vec::new(); // TODO FLORIN
+    let mut base_points = Vec::with_capacity(num_vm_entries);
+    let mut entry_z1 = Vec::with_capacity(num_vm_entries);
+    let mut entry_z2 = Vec::with_capacity(num_vm_entries);
     for entry in vm_operations.iter() {
         entry_z1.push(entry.z1);
         entry_z2.push(entry.z2);
         base_points.push(entry.base_point);
     }
-    let mut is_zero_results =
-        T::is_zero_many_basefield(&[entry_z1, entry_z2].concat(), net, state_)?;
+
+    let mut is_zero_results = driver.is_zero_many(&[entry_z1, entry_z2].concat())?;
     let (z1_zero_results_slice, z2_zero_results_slice) =
-        is_zero_results.split_at_mut(base_points.len()); // TODO FLORIN SIZES
+        is_zero_results.split_at_mut(base_points.len());
     let (z1_is_zero_unchanged, z2_is_zero_unchanged) = (
         z1_zero_results_slice.to_vec(),
         z2_zero_results_slice.to_vec(),
     );
-    T::scale_many_in_place_basefield(z1_zero_results_slice, -C::BaseField::one());
-    T::add_scalar_in_place_basefield(z1_zero_results_slice, C::BaseField::one(), state_.id());
-    T::scale_many_in_place_basefield(z2_zero_results_slice, -C::BaseField::one());
-    T::add_scalar_in_place_basefield(z2_zero_results_slice, C::BaseField::one(), state_.id());
-    let num_mul_partial = T::add_many_basefield(z1_zero_results_slice, z2_zero_results_slice);
+    driver.scale_many_in_place(z1_zero_results_slice, -C::BaseField::one());
+    driver.add_scalar_in_place(z1_zero_results_slice, C::BaseField::one());
+    driver.scale_many_in_place(z2_zero_results_slice, -C::BaseField::one());
+    driver.add_scalar_in_place(z2_zero_results_slice, C::BaseField::one());
+    let num_mul_partial = driver.add_many(z1_zero_results_slice, z2_zero_results_slice);
 
-    let base_points_is_zero = T::point_is_zero_many(&base_points, net, state_)?;
+    let base_points_is_zero = driver.point_is_zero_many(&base_points)?;
     let mut base_points_is_zero_modified = base_points_is_zero.clone();
-    T::scale_many_in_place_basefield(&mut base_points_is_zero_modified, -C::BaseField::one());
-    T::add_scalar_in_place_basefield(
-        &mut base_points_is_zero_modified,
-        C::BaseField::one(),
-        state_.id(),
-    );
-    let num_mul =
-        T::mul_many_basefield(&num_mul_partial, &base_points_is_zero_modified, net, state_)?;
+    driver.scale_many_in_place(&mut base_points_is_zero_modified, -C::BaseField::one());
+    driver.add_scalar_in_place(&mut base_points_is_zero_modified, C::BaseField::one());
+    let num_mul = driver.mul_many(&num_mul_partial, &base_points_is_zero_modified)?;
 
     for i in 0..num_vm_entries {
         let mut row = CoTranscriptRow::<C, T>::default();
@@ -832,18 +685,15 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
         // let z2_zero: bool = if is_mul { entry.z2.is_zero() } else { true };
 
         // let base_point_infinity = entry.base_point.is_zero();
-        let mut num_muls = num_mul[i];
+        let num_muls = num_mul[i];
 
-        updated_state.pc = T::sub_basefield(state.pc, num_muls);
+        updated_state.pc = driver.add(state.pc, num_muls);
 
         if entry.op_code.reset {
-            updated_state.is_accumulator_empty =
-                T::promote_to_trivial_share_basefield(state_.id(), C::BaseField::one()); //true;
-            updated_state.accumulator = T::PointShare::default();
-            updated_state.msm_accumulator = T::promote_to_trivial_point_share(
-                state_.id(),
-                offset_generator_scaled::<C>().into(),
-            );
+            updated_state.is_accumulator_empty = T::AcvmType::from(C::BaseField::one()); //true;
+            updated_state.accumulator = T::AcvmPoint::<C>::default();
+            updated_state.msm_accumulator =
+                T::AcvmPoint::from(offset_generator_scaled::<C>().into());
         }
 
         let last_row = i == (num_vm_entries - 1);
@@ -855,41 +705,36 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
 
         //     // we reset the count in updated state if we are not accumulating and not doing an msm
         let mut msm_transition_public = true;
-        let mut is_zero = T::BaseFieldArithmeticShare::default();
+        let mut is_zero = T::AcvmType::default();
         // is_mul && next_not_msm && (state.count + num_muls > 0);
         if !(is_mul && next_not_msm) {
             msm_transition_public = false;
         } else {
-            is_zero =
-                T::is_zero_many_basefield(&[T::add_basefield(state.count, num_muls)], net, state_)?
-                    [0]; //TODO FLORIN BATCH WITH OTHER IS_ZERO
+            let add = driver.add(state.count, num_muls);
+            is_zero = driver.is_zero_many(&[add])?[0]; //TODO FLORIN BATCH WITH OTHER IS_ZERO
         }
-        let msm_transition = T::mul_with_public_basefield(
+        let msm_transition = driver.mul_with_public(
             C::BaseField::from(entry.op_code.mul && next_not_msm),
             is_zero,
         );
         row.msm_count_zero_at_transition = msm_transition; // This happens in bb inside populate_transcript_row, for simplicity we do it here 
         // we want state.count + num_muls > 0, hence we invert the is_zero result
-        is_zero = T::sub_basefield(
-            T::promote_to_trivial_share_basefield(state_.id(), C::BaseField::one()),
-            is_zero,
-        );
+        is_zero = driver.add(T::AcvmType::from(C::BaseField::one()), is_zero);
 
         // determine ongoing msm and update the respective counter
         let current_ongoing_msm = is_mul && !next_not_msm;
 
         updated_state.count = if current_ongoing_msm {
-            T::add_basefield(state.count, num_muls)
+            driver.add(state.count, num_muls)
         } else {
-            T::BaseFieldArithmeticShare::default()
+            T::AcvmType::default()
         };
 
         if is_mul {
-            CoVMState::<C, T>::process_mul(entry, &mut updated_state, &state, net, state_);
+            CoVMState::<C, T>::process_mul(entry, &mut updated_state, &state, driver);
         }
 
-        let old_state_accumulator_is_zero =
-            T::is_zero_many_basefield(&[state.is_accumulator_empty], net, state_)?[0];
+        let old_state_accumulator_is_zero = driver.is_zero_many(&[state.is_accumulator_empty])?[0];
 
         if msm_transition_public {
             CoVMState::<C, T>::process_msm_transition(
@@ -898,12 +743,11 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
                 &state,
                 T::convert_fields(&[old_state_accumulator_is_zero])?[0],
                 T::convert_fields(&[is_zero])?[0],
-                net,
-                state_,
+                driver,
             )?; //TODO NEED TO MULTYIPLY/CORRECT THIS WITH THE IS_ZEROCHECK
         } else {
-            msm_accumulator_trace[i] = T::PointShare::default();
-            intermediate_accumulator_trace[i] = T::PointShare::default();
+            msm_accumulator_trace[i] = T::AcvmPoint::<C>::default();
+            intermediate_accumulator_trace[i] = T::AcvmPoint::<C>::default();
         }
 
         if is_add {
@@ -912,85 +756,60 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
                 &mut updated_state,
                 &state,
                 T::convert_fields(&[old_state_accumulator_is_zero])?[0],
-                net,
-                state_,
+                driver,
             )?;
         }
 
         row.z1_zero = z1_is_zero_unchanged[i]; // We do this already outside of the function
         row.z2_zero = z2_is_zero_unchanged[i]; // We do this already outside of the function
 
-        //     // populate the first group of TranscriptRow entries
+        // populate the first group of TranscriptRow entries
         CoVMState::<C, T>::populate_transcript_row(
             &mut row,
             base_points_is_zero[i],
             entry,
             &state,
             msm_transition,
-            net,
-            state_,
+            driver,
         )?;
 
-        msm_count_at_transition_inverse_trace[i] = T::add_basefield(state.count, num_muls);
+        msm_count_at_transition_inverse_trace[i] = driver.add(state.count, num_muls);
 
         //      update the accumulators
         accumulator_trace[i] = state.accumulator;
         let msm_transition_as_scalarfield = T::convert_fields(&[msm_transition])?[0];
-        let mul = T::scalar_mul_many(
+        let mul = driver.scalar_mul_many(
             &[
                 updated_state.msm_accumulator,
-                T::point_add(
-                    &updated_state.msm_accumulator,
-                    &T::promote_to_trivial_point_share(
-                        state_.id(),
-                        -offset_generator_scaled::<C>().into(),
-                    ),
+                driver.add_points(
+                    updated_state.msm_accumulator,
+                    T::AcvmPoint::from(-offset_generator_scaled::<C>().into()),
                 ),
             ],
             &[msm_transition_as_scalarfield, msm_transition_as_scalarfield],
-            net,
-            state_,
         );
-
         msm_accumulator_trace[i] = mul[0];
         intermediate_accumulator_trace[i] = mul[1];
 
         state = updated_state.clone();
 
         if is_mul && next_not_msm {
-            state.msm_accumulator = T::promote_to_trivial_point_share(
-                state_.id(),
-                offset_generator_scaled::<C>().into(),
-            );
+            state.msm_accumulator = T::AcvmPoint::from(offset_generator_scaled::<C>().into());
         }
         transcript_state.push(row);
     }
-    // compute affine coordinates of the accumulated points
-    // TODO FLORIN STILL NEED TO DO THIS
-    // accumulator_trace = Utils::batch_normalize::<C>(&accumulator_trace);
-    // msm_accumulator_trace = Utils::batch_normalize::<C>(&msm_accumulator_trace);
-    // intermediate_accumulator_trace = Utils::batch_normalize::<C>(&intermediate_accumulator_trace);
 
     // add required affine coordinates to the transcript
-    // add_affine_coordinates_to_transcript(
-    //     &mut transcript_state,
-    //     &accumulator_trace,
-    //     &msm_accumulator_trace,
-    //     &intermediate_accumulator_trace,
-    //     net,
-    //     state_,
-    // );
+
     let accumulator_trace_len = accumulator_trace.len();
     let msm_accumulator_trace_len = msm_accumulator_trace.len();
-    let (xs, ys, inf) = T::pointshare_to_field_shares_many(
+    let (xs, ys, inf) = driver.pointshare_to_field_shares_many(
         &[
             accumulator_trace.clone(),
             msm_accumulator_trace.clone(),
             intermediate_accumulator_trace.clone(),
         ]
         .concat(),
-        net,
-        state_,
     )?;
     //TODO FLORIN: check sizes
     let len_acc = accumulator_trace_len;
@@ -1000,7 +819,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     let (acc_ys, rest) = ys.split_at(len_acc);
     let (msm_ys, int_ys) = rest.split_at(len_msm);
     let (acc_inf, rest) = inf.split_at(len_acc);
-    let (msm_inf, int_inf) = rest.split_at(len_msm);
+    let (msm_inf, _int_inf) = rest.split_at(len_msm);
 
     for i in 0..accumulator_trace_len {
         let row = &mut transcript_state[i + 1];
@@ -1010,44 +829,10 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
         row.msm_output_y = msm_ys[i];
         row.transcript_msm_intermediate_x = int_xs[i];
         row.transcript_msm_intermediate_y = int_ys[i];
-        // if !accumulator_trace[i].is_zero() {
-        //     row.accumulator_x = accumulator_trace[i]
-        //         .x()
-        //         .expect("Accumulator x-coordinate should not be zero");
-        //     row.accumulator_y = accumulator_trace[i]
-        //         .y()
-        //         .expect("Accumulator y-coordinate should not be zero");
-        // }
-        // if !msm_accumulator_trace[i].is_zero() {
-        //     row.msm_output_x = msm_accumulator_trace[i]
-        //         .x()
-        //         .expect("MSM accumulator x-coordinate should not be zero");
-        //     row.msm_output_y = msm_accumulator_trace[i]
-        //         .y()
-        //         .expect("MSM accumulator y-coordinate should not be zero");
-        // }
-        // if !intermediate_accumulator_trace[i].is_zero() {
-        //     row.transcript_msm_intermediate_x = intermediate_accumulator_trace[i]
-        //         .x()
-        //         .expect("Intermediate accumulator x-coordinate should not be zero");
-        //     row.transcript_msm_intermediate_y = intermediate_accumulator_trace[i]
-        //         .y()
-        //         .expect("Intermediate accumulator y-coordinate should not be zero");
-        // }
     }
 
     // process the slopes when adding points or results of MSMs. to increase efficiency, we use batch inversion
     // after the loop
-    // let points = T::pointshare_to_field_shares_many(
-    //     &[
-    //         &accumulator_trace,
-    //         &msm_accumulator_trace,
-    //         &intermediate_accumulator_trace,
-    //     ]
-    //     .concat(),
-    //     net,
-    //     state_,
-    // )?;
 
     let mut is_zero_vm_point = Vec::new();
     for i in 0..accumulator_trace_len {
@@ -1058,32 +843,49 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
             is_zero_vm_point.push(intermediate_accumulator_trace[i]);
         }
     }
-    //TODO FLORIN: BATCH THESE
+    //TODO FLORIN: BATCH ALL THESE as much as possible
     let (vm_points_x, vm_points_y, vm_points_inf) =
-        T::pointshare_to_field_shares_many(&is_zero_vm_point, net, state_)?;
-    let is_zero_results = T::point_is_zero_many(&is_zero_vm_point, net, state_)?;
-    let mul = T::mul_many_basefield(&is_zero_results, &acc_inf, net, state_)?;
-    let mul_transcript_add = T::mul_many_basefield(&vm_points_inf, &acc_inf, net, state_)?;
-    let to_cmp_x = T::sub_many_basefield(&vm_points_x, &acc_xs);
-    let to_cmp_y = T::sub_many_basefield(&vm_points_y, &acc_ys);
-    let is_zero_transcript_add =
-        T::is_zero_many_basefield(&[to_cmp_x, to_cmp_y].concat(), net, state_)?;
-    let transcript_add_values = T::add_many_basefield(
+        driver.pointshare_to_field_shares_many(&is_zero_vm_point)?; //TODO FLORIN BATCH THIS INTO THE ABOVE CALL
+    let vm_x_squared = driver.mul_many(&vm_points_x, &vm_points_x)?; //TODO FLORIN BATCH THIS INTO THE ABOVE CALL
+    let vm_x_squared_times_3 = driver.scale_many(&vm_x_squared, C::BaseField::from(3u32));
+    let vm_y_doubled = driver.add_many(&vm_points_y, &vm_points_y);
+    let acc_x_minus_vm_x = driver.sub_many(acc_xs, &vm_points_x);
+    let acc_y_minus_vm_y = driver.sub_many(acc_ys, &vm_points_y);
+
+    let vm_inf_and_acc_inf = driver.mul_many(&vm_points_inf, acc_inf)?;
+    let scale = driver.scale_many(&vm_inf_and_acc_inf, -C::BaseField::one());
+    let inv_vm_inf_and_acc_inf = driver.add_scalar(&scale, C::BaseField::one());
+    let to_cmp_x = driver.sub_many(&vm_points_x, acc_xs);
+    let to_cmp_y = driver.sub_many(&vm_points_y, acc_ys);
+    let is_zero_transcript_add = driver.is_zero_many(&[to_cmp_x, to_cmp_y].concat())?;
+    let (is_zero_transcript_add_x, is_zero_transcript_add_y) =
+        is_zero_transcript_add.split_at(is_zero_transcript_add.len() / 2);
+
+    let transcript_add_values = driver.add_many(
         &is_zero_transcript_add[..num_vm_entries],
-        &mul_transcript_add[..num_vm_entries],
+        &vm_inf_and_acc_inf[..num_vm_entries],
     );
+    let transcript_add_values = driver.is_zero_many(&transcript_add_values)?; //TODO FLORIN: is there a better way to do this? 
     let (transcript_add_x_equal, transcript_add_y_equal) =
         transcript_add_values.split_at(transcript_add_values.len() / 2);
+    let mul = driver.mul_many(is_zero_transcript_add_x, is_zero_transcript_add_y)?; //(accumulator_x == vm_x) && (accumulator_y == vm_y
+    let next_mul = driver.mul_many(&mul, &inv_vm_inf_and_acc_inf)?; //(accumulator_x == vm_x) && (accumulator_y == vm_y) && !vm_infinity && !accumulator_infinity
+    let scale = driver.scale_many(transcript_add_x_equal, -C::BaseField::one());
+    let inv_transcript_add_x_equal = driver.add_scalar(&scale, C::BaseField::one());
+    let else_mul = driver.mul_many(&vm_inf_and_acc_inf, &inv_transcript_add_x_equal)?; //(vm_infinity && accumulator_infinity) && !((accumulator_x == vm_x) && (accumulator_y == vm_y))
+    let lambda_denom_1 = driver.mul_many(&vm_y_doubled, &next_mul)?; //vm_y + vm_y if (accumulator_x == vm_x) && (accumulator_y == vm_y) && !vm_infinity && !accumulator_infinity
+    let lambda_denom_2 = driver.mul_many(&acc_x_minus_vm_x, &else_mul)?; //accumulator_x - vm_x if (vm_infinity && accumulator_infinity) && !((accumulator_x == vm_x) && (accumulator_y == vm_y))
+    let lambda_num_1 = driver.mul_many(&vm_x_squared_times_3, &next_mul)?; //vm_x * vm_x * 3 if (accumulator_x == vm_x) && (accumulator_y == vm_y) && !vm_infinity && !accumulator_infinity
+    let lambda_num_2 = driver.mul_many(&acc_y_minus_vm_y, &else_mul)?; //accumulator_y - vm_y if (vm_infinity && accumulator_infinity) && !((accumulator_x == vm_x) && (accumulator_y == vm_y))
+    let mut add_lambda_numerator = driver.add_many(&lambda_num_1, &lambda_num_2);
+    let mut add_lambda_denominator = driver.add_many(&lambda_denom_1, &lambda_denom_2);
     for i in 0..accumulator_trace_len {
         let row = &mut transcript_state[i + 1];
         let msm_transition = row.msm_transition;
 
-        let entry = &vm_operations[i];
-        let is_add = entry.op_code.add;
-
-        // if is_add {
         // compute the differences between point coordinates
-        compute_inverse_trace_coordinates::<C, T, N>(
+        // TACEO Note: We compute everything and then multiply it by the msm_transition is_zero afterwards
+        compute_inverse_trace_coordinates::<C, T>(
             msm_transition,
             row,
             int_xs[i],
@@ -1095,41 +897,13 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
             acc_ys[i],
             &mut inverse_trace_x[i],
             &mut inverse_trace_y[i],
-            net,
-            state_,
+            driver,
         )?;
 
         row.transcript_add_x_equal = transcript_add_x_equal[i]; //(vm_x == accumulator_x) || (vm_infinity && accumulator_infinity);
         row.transcript_add_y_equal = transcript_add_y_equal[i]; //(vm_y == accumulator_y) || (vm_infinity && accumulator_infinity);
 
         // compute the numerators and denominators of slopes between the points
-        compute_lambda_numerator_and_denominator::<C, T, N>(
-            row,
-            entry,
-            &intermediate_accumulator_trace[i],
-            &accumulator_trace[i],
-            acc_xs[i],
-            acc_ys[i],
-            acc_inf[i],
-            &mut add_lambda_numerator[i],
-            &mut add_lambda_denominator[i],
-            vm_points_x[i],
-            vm_points_y[i],
-            vm_points_inf[i],
-            net,
-            state_,
-        );
-        // }
-        // else if msm_transition ||  //TODO FLORIN
-        // else {
-        // row.transcript_add_x_equal = T::BaseFieldArithmeticShare::default();
-        // row.transcript_add_y_equal = T::BaseFieldArithmeticShare::default();
-        // add_lambda_numerator[i] = T::BaseFieldArithmeticShare::default();
-        // add_lambda_denominator[i] = T::BaseFieldArithmeticShare::default();
-        // inverse_trace_x[i] = T::BaseFieldArithmeticShare::default();
-        // inverse_trace_y[i] = T::BaseFieldArithmeticShare::default();
-        // }
-        // }
     }
     let mut tmp_transcript_add_x_equal = Vec::new(); //TODO FLORIN
     let mut tmp_transcript_add_y_equal = Vec::new(); //TODO FLORIN
@@ -1154,7 +928,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
             indices.push(i);
         }
     }
-    let mul = T::mul_many_basefield(
+    let mul = driver.mul_many(
         &[
             tmp_transcript_add_x_equal,
             tmp_transcript_add_y_equal,
@@ -1173,9 +947,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
             tmp_msm_transition.clone(),
         ]
         .concat(),
-        net,
-        state_,
-    )?; //TODO FLORIN is this possible to make nicer
+    )?; //TODO FLORIN is it possible to make this nicer
     for (j, i) in indices.iter().enumerate() {
         transcript_state[i + 1].transcript_add_x_equal = mul[j];
         transcript_state[i + 1].transcript_add_y_equal = mul[j + indices.len()];
@@ -1194,7 +966,7 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     // ark_ff::batch_inversion(&mut msm_count_at_transition_inverse_trace);
 
     // Populate the fields of the transcript row containing inverted scalars
-    let mul = T::mul_many_basefield(&add_lambda_numerator, &add_lambda_denominator, net, state_)?;
+    let mul = driver.mul_many(&add_lambda_numerator, &add_lambda_denominator)?;
     for i in 0..num_vm_entries {
         let row = &mut transcript_state[i + 1];
         row.base_x_inverse = inverse_trace_x[i];
@@ -1205,30 +977,189 @@ fn compute_rows<C: HonkCurve<TranscriptFieldType>, T: NoirUltraHonkProver<C>, N:
     }
 
     // process the final row containing the result of the sequence of group ops in ECCOpQueue
-    let final_row = finalize_transcript(&updated_state, net, state_)?;
+    let final_row = finalize_transcript(&updated_state, driver)?;
     transcript_state.push(final_row);
 
     Ok(transcript_state)
 }
-
-pub fn construct_from_builder<
-    C: HonkCurve<TranscriptFieldType>,
-    T: NoirUltraHonkProver<C::CycleGroup>,
-    A: NoirUltraHonkProver<C>,
-    N: Network,
->(
-    op_queue: &mut CoECCOpQueue<T, C::CycleGroup>,
-    net: &N,
-    state_: &mut T::State,
-) -> eyre::Result<Polynomials<A::ArithmeticShare, C::ScalarField, ECCVMFlavour>>
-where
-    A::ArithmeticShare: From<T::ArithmeticShare>,
-{
-    let eccvm_ops = op_queue.get_eccvm_ops().to_vec();
-    let number_of_muls = op_queue.get_number_of_muls();
-    let transcript_rows =
-        compute_rows::<C::CycleGroup, T, N>(&eccvm_ops, number_of_muls, net, state_)
-            .expect("Failed to compute transcript rows");
-
-    todo!()
+#[derive(Debug)]
+struct PointTablePrecomputationRow<
+    C: CurveGroup<BaseField: PrimeField>,
+    T: NoirWitnessExtensionProtocol<C::BaseField>,
+> {
+    s1: i32,
+    s2: i32,
+    s3: i32,
+    s4: i32,
+    s5: i32,
+    s6: i32,
+    s7: i32,
+    s8: i32,
+    skew: bool,
+    point_transition: bool,
+    pc: u32,
+    round: u32,
+    scalar_sum: BigUint,
+    precompute_accumulator: T::AcvmPoint<C>,
+    precompute_double: T::AcvmPoint<C>,
 }
+
+impl<C: CurveGroup<BaseField: PrimeField>, T: NoirWitnessExtensionProtocol<C::BaseField>> Default
+    for PointTablePrecomputationRow<C, T>
+{
+    fn default() -> Self {
+        Self {
+            s1: 0,
+            s2: 0,
+            s3: 0,
+            s4: 0,
+            s5: 0,
+            s6: 0,
+            s7: 0,
+            s8: 0,
+            skew: false,
+            point_transition: false,
+            pc: 0,
+            round: 0,
+            scalar_sum: BigUint::zero(),
+            precompute_accumulator: T::AcvmPoint::<C>::default(),
+            precompute_double: T::AcvmPoint::<C>::default(),
+        }
+    }
+}
+impl<C: CurveGroup<BaseField: PrimeField>, T: NoirWitnessExtensionProtocol<C::BaseField>> Clone
+    for PointTablePrecomputationRow<C, T>
+{
+    fn clone(&self) -> Self {
+        Self {
+            s1: self.s1,
+            s2: self.s2,
+            s3: self.s3,
+            s4: self.s4,
+            s5: self.s5,
+            s6: self.s6,
+            s7: self.s7,
+            s8: self.s8,
+            skew: self.skew,
+            point_transition: self.point_transition,
+            pc: self.pc,
+            round: self.round,
+            scalar_sum: self.scalar_sum.clone(),
+            precompute_accumulator: self.precompute_accumulator,
+            precompute_double: self.precompute_double,
+        }
+    }
+}
+
+impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseField>>
+    PointTablePrecomputationRow<C, T>
+{
+    fn compute_rows(msms: &[ScalarMul<T, C>]) -> Vec<PointTablePrecomputationRow<C, T>> {
+        let num_rows_per_scalar = NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW;
+        let num_precompute_rows = num_rows_per_scalar * msms.len() + 1;
+        let mut precompute_state =
+            vec![PointTablePrecomputationRow::<C, T>::default(); num_precompute_rows];
+
+        // Start with an empty row (shiftable polynomials must have 0 as the first coefficient)
+        precompute_state[0] = PointTablePrecomputationRow::<C, T>::default();
+
+        // current impl doesn't work if not 4
+        assert_eq!(WNAF_DIGITS_PER_ROW, 4);
+
+        msms.iter().enumerate().for_each(|(j, entry)| {
+            let slices = &entry.wnaf_digits;
+            let mut scalar_sum = BigUint::zero();
+
+            for i in 0..num_rows_per_scalar {
+                let mut row = PointTablePrecomputationRow::<C, T>::default();
+                let slice0 = slices[i * WNAF_DIGITS_PER_ROW];
+                let slice1 = slices[i * WNAF_DIGITS_PER_ROW + 1];
+                let slice2 = slices[i * WNAF_DIGITS_PER_ROW + 2];
+                let slice3 = slices[i * WNAF_DIGITS_PER_ROW + 3];
+
+                let slice0base2 = (slice0 + 15) / 2;
+                let slice1base2 = (slice1 + 15) / 2;
+                let slice2base2 = (slice2 + 15) / 2;
+                let slice3base2 = (slice3 + 15) / 2;
+
+                // Convert into 2-bit chunks
+                row.s1 = slice0base2 >> 2;
+                row.s2 = slice0base2 & 3;
+                row.s3 = slice1base2 >> 2;
+                row.s4 = slice1base2 & 3;
+                row.s5 = slice2base2 >> 2;
+                row.s6 = slice2base2 & 3;
+                row.s7 = slice3base2 >> 2;
+                row.s8 = slice3base2 & 3;
+
+                let last_row = i == num_rows_per_scalar - 1;
+                row.skew = if last_row { entry.wnaf_skew } else { false };
+                row.scalar_sum = scalar_sum.clone();
+
+                // Ensure slice1 is positive for the first row of each scalar sum
+                let row_chunk = slice3 + (slice2 << 4) + (slice1 << 8) + (slice0 << 12);
+                let chunk_negative = row_chunk < 0;
+
+                scalar_sum <<= NUM_WNAF_DIGIT_BITS * WNAF_DIGITS_PER_ROW;
+                if chunk_negative {
+                    scalar_sum -= BigUint::from((-row_chunk) as u64);
+                } else {
+                    scalar_sum += BigUint::from(row_chunk as u64);
+                }
+
+                row.round = i as u32;
+                row.point_transition = last_row;
+                row.pc = entry.pc;
+
+                // We don't do this assert here
+                // if last_row {
+                //     assert_eq!(
+                //         scalar_sum.clone() - BigUint::from(entry.wnaf_skew as u64),
+                //         entry.scalar
+                //     );
+                // }
+
+                row.precompute_double = entry.precomputed_table[POINT_TABLE_SIZE].to_owned();
+                // fill accumulator in reverse order i.e. first row = 15[P], then 13[P], ..., 1[P]
+                row.precompute_accumulator =
+                    entry.precomputed_table[POINT_TABLE_SIZE - 1 - i].to_owned();
+                precompute_state[j * num_rows_per_scalar + i + 1] = row;
+            }
+        });
+        // precompute_state
+        todo!("Only after scalarmul is implemented")
+    }
+}
+
+// pub fn construct_from_builder<
+//     C: HonkCurve<TranscriptFieldType>,
+//     T: NoirUltraHonkProver<C::CycleGroup>,
+//     A: NoirUltraHonkProver<C>,
+//     N: Network,
+// >(
+//     op_queue: &mut CoECCOpQueue<T, C::CycleGroup>,
+//     net: &N,
+//     state_: &mut T::State,
+// ) -> eyre::Result<Polynomials<A::ArithmeticShare, C::ScalarField, ECCVMFlavour>>
+// where
+//     A::ArithmeticShare: From<T::ArithmeticShare>,
+// {
+//     let eccvm_ops = op_queue.get_eccvm_ops().to_vec();
+//     let number_of_muls = op_queue.get_number_of_muls();
+//     let transcript_rows =
+//         compute_rows::<C::CycleGroup, T, N>(&eccvm_ops, number_of_muls, )
+//             .expect("Failed to compute transcript rows");
+//     let msms = op_queue.get_msms();
+//     let point_table_rows = PointTablePrecomputationRow::<C::CycleGroup, T>::compute_rows(
+//         &msms.iter().flat_map(|msm| msm.clone()).collect::<Vec<_>>(),
+//     );
+//     // let result = MSMRow::<C::CycleGroup, T>::compute_rows_msms(
+//     //     &msms,
+//     //     number_of_muls,
+//     //     op_queue.get_num_msm_rows(),
+//     //     net,
+//     //     state_,
+//     // );
+
+//     todo!()
+// }
