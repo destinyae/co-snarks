@@ -424,6 +424,19 @@ impl<P: CurveGroup<BaseField: PrimeField>> NoirUltraHonkProver<P> for ShamirUltr
         todo!()
     }
 
+    fn msm_public_scalars(
+        points: &[Self::PointShare],
+        scalars: &[<P>::ScalarField],
+    ) -> Vec<Self::PointShare> {
+        todo!()
+    }
+    fn add_assign_basefield(
+        a: &mut Self::BaseFieldArithmeticShare,
+        b: Self::BaseFieldArithmeticShare,
+    ) {
+        todo!()
+    }
+
     // fn is_zero_binary_many<N: Network>(
     //     _a: &[Self::BinaryShare],
     //     _net: &N,

@@ -418,7 +418,12 @@ impl<P: CurveGroup<BaseField: PrimeField>> NoirUltraHonkProver<P> for Rep3UltraH
         net: &N,
         state: &mut Self::State,
     ) -> eyre::Result<Self::ArithmeticShare> {
-        todo!()
+        let b_min_a = arithmetic::sub(truthy, falsy);
+        let d = {
+            let v = arithmetic::mul_vec(&[cond], &[b_min_a], net, state)?;
+            v.into_iter().next().unwrap()
+        };
+        Ok(arithmetic::add(falsy, d))
     }
 
     fn add_with_public_basefield(
@@ -434,6 +439,52 @@ impl<P: CurveGroup<BaseField: PrimeField>> NoirUltraHonkProver<P> for Rep3UltraH
         net: &N,
         state: &mut Self::State,
     ) -> eyre::Result<()> {
+        // let cmux = |cond: &[Self::ArithmeticShare],
+        //             truthy: &[Self::ArithmeticShare],
+        //             falsy: &[Self::ArithmeticShare]|
+        //  -> eyre::Result<Vec<Self::ArithmeticShare>> {
+        //     let mut b_min_a = truthy.to_vec();
+        //     arithmetic::sub_vec_assign(&mut b_min_a, falsy);
+
+        //     let mut d = arithmetic::mul_vec(cond, &b_min_a, net, state)?;
+        //     arithmetic::add_vec_assign(&mut d, falsy);
+        //     Ok(d)
+        // };
+
+        // let zeroes = vec![P::ScalarField::zero(); a.len()];
+        // let is_zero = arithmetic::eq_public_many(a, &zeroes, net, state)?;
+        // let to_invert = cmux(
+        //     &is_zero,
+        //     &vec![arithmetic::promote_to_trivial_share(state.id(), P::ScalarField::one()); a.len()],
+        //     a,
+        // )?;
+        // let r = (0..a.len())
+        //     .map(|_| <Self as NoirUltraHonkProver<P>>::rand(net, state))
+        //     .collect::<Result<Vec<_>, _>>()?;
+        // let y: Vec<P::ScalarField> =
+        //     <Self as NoirUltraHonkProver<P>>::mul_open_many(a, &r, net, state)?;
+        // for (a, r, y) in izip!(a.iter_mut(), r, y) {
+        //     *a = r * y.inverse().unwrap();
+        // }
+        // let cmux = cmux(
+        //     &is_zero,
+        //     &vec![Self::ArithmeticShare::default(); a.len()],
+        //     a,
+        // )?;
+        // Ok(())
+        todo!()
+    }
+
+    fn msm_public_scalars(
+        points: &[Self::PointShare],
+        scalars: &[<P>::ScalarField],
+    ) -> Vec<Self::PointShare> {
+        todo!()
+    }
+    fn add_assign_basefield(
+        a: &mut Self::BaseFieldArithmeticShare,
+        b: Self::BaseFieldArithmeticShare,
+    ) {
         todo!()
     }
 

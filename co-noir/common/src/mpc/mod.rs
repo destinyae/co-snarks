@@ -126,6 +126,12 @@ pub trait NoirUltraHonkProver<P: CurveGroup>: Send + Sized {
     /// Add two shares: \[c\] = \[a\] + \[b\] and stores the result in \[a\].
     fn add_assign(a: &mut Self::ArithmeticShare, b: Self::ArithmeticShare);
 
+    /// Add two shares: \[c\] = \[a\] + \[b\] and stores the result in \[a\].
+    fn add_assign_basefield(
+        a: &mut Self::BaseFieldArithmeticShare,
+        b: Self::BaseFieldArithmeticShare,
+    );
+
     /// Elementwise addition of two shares: \[c\] = \[a\] + \[b\] and stores the result in \[a\].
     fn add_assign_many(a: &mut [Self::ArithmeticShare], b: &[Self::ArithmeticShare]) {
         for (a, b) in a.iter_mut().zip(b.iter()) {
@@ -228,6 +234,19 @@ pub trait NoirUltraHonkProver<P: CurveGroup>: Send + Sized {
             .collect()
     }
 
+    /// Elementwise multiplication a share b by a public value a: c = a * \[b\].
+    fn mul_with_public_many_basefield(
+        public: &[P::BaseField],
+        shared: &[Self::BaseFieldArithmeticShare],
+    ) -> Vec<Self::BaseFieldArithmeticShare> {
+        debug_assert_eq!(public.len(), shared.len());
+        public
+            .iter()
+            .zip(shared.iter())
+            .map(|(public, shared)| Self::mul_with_public_basefield(*public, *shared))
+            .collect()
+    }
+
     fn add_assign_public_half_share(
         share: &mut P::ScalarField,
         public: P::ScalarField,
@@ -285,6 +304,18 @@ pub trait NoirUltraHonkProver<P: CurveGroup>: Send + Sized {
             .collect()
     }
 
+    /// Scales all elements in-place in \[a\] by the provided scale, by multiplying every share with the
+    /// public scalar.
+    fn scale_many_basefield(
+        shared: &[Self::BaseFieldArithmeticShare],
+        scale: P::BaseField,
+    ) -> Vec<Self::BaseFieldArithmeticShare> {
+        shared
+            .iter()
+            .map(|share| Self::mul_with_public_basefield(scale, *share))
+            .collect()
+    }
+
     /// Adds a public scalar to all elements in \[a\].
     fn add_scalar(
         shared: &[Self::ArithmeticShare],
@@ -317,6 +348,18 @@ pub trait NoirUltraHonkProver<P: CurveGroup>: Send + Sized {
         for x in shared.iter_mut() {
             Self::add_assign_public_basefield(x, scalar, id);
         }
+    }
+
+    /// Adds a public scalar to all elements in \[a\].
+    fn add_scalar_basefield(
+        shared: &[Self::BaseFieldArithmeticShare],
+        scalar: P::BaseField,
+        id: <Self::State as MpcState>::PartyID,
+    ) -> Vec<Self::BaseFieldArithmeticShare> {
+        shared
+            .iter()
+            .map(|share| Self::add_with_public_basefield(scalar, *share, id))
+            .collect()
     }
 
     fn local_mul_vec(
@@ -484,6 +527,11 @@ pub trait NoirUltraHonkProver<P: CurveGroup>: Send + Sized {
         points: &[P::Affine],
         scalars: &[Self::ArithmeticShare],
     ) -> Self::PointShare;
+
+    fn msm_public_scalars(
+        points: &[Self::PointShare],
+        scalars: &[P::ScalarField],
+    ) -> Vec<Self::PointShare>;
 
     /// Adds two shared points: \[c\] = \[a\] + \[b\].
     fn point_add(a: &Self::PointShare, b: &Self::PointShare) -> Self::PointShare;
