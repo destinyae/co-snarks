@@ -122,7 +122,7 @@ where
         let second_labels = ECCVMFlavour::to_be_shifted_without_accumulators_labels();
         let third_labels = ECCVMFlavour::to_be_shifted_accumulators_labels();
 
-        //TODO FLORIN: TAKE CARE OF COMMITTING
+        //TODO FLORIN: TAKE CARE OF COMMITTING (WHAT EXACTLY?)
         let mut commitments =
             Vec::with_capacity(first_labels.len() + second_labels.len() + third_labels.len());
         for wire in non_shifted.iter_mut() {
