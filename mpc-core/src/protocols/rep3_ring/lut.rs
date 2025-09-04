@@ -2,8 +2,7 @@
 //!
 //! This module contains implementation of a LUT
 
-use std::marker::PhantomData;
-
+use super::{Rep3RingShare, ring::int_ring::IntRing2k};
 use crate::{
     lut::LookupTableProvider,
     protocols::{
@@ -14,11 +13,11 @@ use crate::{
         rep3_ring::{conversion, gadgets, ring::bit::Bit},
     },
 };
+use ark_ec::CurveGroup;
 use ark_ff::PrimeField;
 use mpc_net::Network;
 use rand::{distributions::Standard, prelude::Distribution};
-
-use super::{Rep3RingShare, ring::int_ring::IntRing2k};
+use std::marker::PhantomData;
 
 /// Implements an enum which stores a lookup table, either consisting of public or private values.
 pub enum PublicPrivateLut<F: PrimeField> {
@@ -393,5 +392,66 @@ impl<F: PrimeField> LookupTableProvider<F> for Rep3LookupTable<F> {
             PublicPrivateLut::Public(items) => Ok(items),
             PublicPrivateLut::Shared(_) => Err(eyre::eyre!("Expected public LUT")),
         }
+    }
+}
+
+pub struct Rep3CurveLookupTable<C: CurveGroup> {
+    phantom: PhantomData<C>,
+}
+
+impl<C: CurveGroup> Default for Rep3CurveLookupTable<C> {
+    fn default() -> Self {
+        Self {
+            phantom: PhantomData::<C>,
+        }
+    }
+}
+
+impl<C: CurveGroup> LookupTableProvider<C> for Rep3CurveLookupTable<C> {
+    type SecretShare = C;
+
+    type LutType = Vec<C>;
+
+    type State = ();
+
+    fn init_private(&self, values: Vec<Self::SecretShare>) -> Self::LutType {
+        todo!()
+    }
+
+    fn init_public(&self, values: Vec<C>) -> Self::LutType {
+        todo!()
+    }
+
+    fn get_from_lut<N: Network>(
+        &mut self,
+        index: Self::SecretShare,
+        lut: &Self::LutType,
+        net0: &N,
+        net1: &N,
+        state0: &mut Self::State,
+        state1: &mut Self::State,
+    ) -> eyre::Result<Self::SecretShare> {
+        todo!()
+    }
+
+    fn write_to_lut<N: Network>(
+        &mut self,
+        index: Self::SecretShare,
+        value: Self::SecretShare,
+        lut: &mut Self::LutType,
+        net0: &N,
+        net1: &N,
+        state0: &mut Self::State,
+        state1: &mut Self::State,
+    ) -> eyre::Result<()> {
+        todo!()
+    }
+
+    fn get_lut_len(lut: &Self::LutType) -> usize {
+        todo!()
+    }
+
+    fn get_public_lut(lut: &Self::LutType) -> eyre::Result<&Vec<C>> {
+        todo!()
     }
 }

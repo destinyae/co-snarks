@@ -3,6 +3,7 @@ use ark_ec::CurveGroup;
 use ark_ff::{One, PrimeField};
 use co_brillig::mpc::{ShamirBrilligDriver, ShamirBrilligType};
 use core::panic;
+use mpc_core::protocols::rep3_ring::lut::Rep3CurveLookupTable;
 use mpc_core::{
     MpcState,
     gadgets::poseidon2::{Poseidon2, Poseidon2Precomputations},
@@ -153,6 +154,7 @@ impl<F: PrimeField> From<ShamirBrilligType<F>> for ShamirAcvmType<F> {
 
 impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for ShamirAcvmSolver<'a, F, N> {
     type Lookup = Rep3LookupTable<F>; // This is just a dummy and unused
+    type CurveLookup<C: CurveGroup<BaseField = F>> = Rep3CurveLookupTable<C>; // This is just a dummy and unused
 
     type ArithmeticShare = ShamirPrimeFieldShare<F>;
 

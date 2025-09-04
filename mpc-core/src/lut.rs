@@ -2,13 +2,14 @@
 //!
 //! This module contains the abstraction to lookup tables
 
+use ark_ec::CurveGroup;
 use ark_ff::PrimeField;
 use mpc_net::Network;
 use num_bigint::BigUint;
 use std::marker::PhantomData;
 
 /// This is some place holder definition. This will change most likely
-pub trait LookupTableProvider<F: PrimeField>: Default {
+pub trait LookupTableProvider<T: Default>: Default {
     /// The type used in LUTs
     type SecretShare;
     /// An input/output LUT (like `Vector`).
@@ -20,7 +21,7 @@ pub trait LookupTableProvider<F: PrimeField>: Default {
     fn init_private(&self, values: Vec<Self::SecretShare>) -> Self::LutType;
 
     /// Initializes a LUT from the provided public values.
-    fn init_public(&self, values: Vec<F>) -> Self::LutType;
+    fn init_public(&self, values: Vec<T>) -> Self::LutType;
 
     /// Reads a value from the LUT associated with the provided index. As we work over secret-shared
     /// values we can not check whether the index is actually in the LUT, the caller must ensure that the LUT is large enough.
@@ -65,7 +66,7 @@ pub trait LookupTableProvider<F: PrimeField>: Default {
     fn get_lut_len(lut: &Self::LutType) -> usize;
 
     /// Returns the LUT as a vec if public
-    fn get_public_lut(lut: &Self::LutType) -> eyre::Result<&Vec<F>>;
+    fn get_public_lut(lut: &Self::LutType) -> eyre::Result<&Vec<T>>;
 }
 
 /// LUT provider for public values
@@ -126,5 +127,60 @@ impl<F: PrimeField> LookupTableProvider<F> for PlainLookupTableProvider<F> {
 
     fn get_public_lut(lut: &Self::LutType) -> eyre::Result<&Vec<F>> {
         Ok(lut)
+    }
+}
+
+/// LUT provider for public values
+#[derive(Default)]
+pub struct PlainCurveLookupTableProvider<C: CurveGroup> {
+    phantom_data: PhantomData<C>,
+}
+
+impl<C: CurveGroup> LookupTableProvider<C> for PlainCurveLookupTableProvider<C> {
+    type SecretShare = C;
+
+    type LutType = Vec<C>;
+
+    type State = ();
+
+    fn init_private(&self, values: Vec<Self::SecretShare>) -> Self::LutType {
+        todo!()
+    }
+
+    fn init_public(&self, values: Vec<C>) -> Self::LutType {
+        todo!()
+    }
+
+    fn get_from_lut<N: Network>(
+        &mut self,
+        index: Self::SecretShare,
+        lut: &Self::LutType,
+        net0: &N,
+        net1: &N,
+        state0: &mut Self::State,
+        state1: &mut Self::State,
+    ) -> eyre::Result<Self::SecretShare> {
+        todo!()
+    }
+
+    fn write_to_lut<N: Network>(
+        &mut self,
+        index: Self::SecretShare,
+        value: Self::SecretShare,
+        lut: &mut Self::LutType,
+        net0: &N,
+        net1: &N,
+        state0: &mut Self::State,
+        state1: &mut Self::State,
+    ) -> eyre::Result<()> {
+        todo!()
+    }
+
+    fn get_lut_len(lut: &Self::LutType) -> usize {
+        todo!()
+    }
+
+    fn get_public_lut(lut: &Self::LutType) -> eyre::Result<&Vec<C>> {
+        todo!()
     }
 }

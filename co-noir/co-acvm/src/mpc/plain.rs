@@ -63,6 +63,8 @@ impl<F: PrimeField> Default for PlainAcvmSolver<F> {
 
 impl<F: PrimeField> NoirWitnessExtensionProtocol<F> for PlainAcvmSolver<F> {
     type Lookup = PlainLookupTableProvider<F>;
+    type CurveLookup<C: CurveGroup<BaseField = F>> =
+        mpc_core::lut::PlainCurveLookupTableProvider<C>;
     type ArithmeticShare = F;
     type AcvmType = F;
     type AcvmPoint<C: CurveGroup<BaseField = F>> = C;

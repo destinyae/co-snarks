@@ -4,6 +4,7 @@ use crate::eccvm::co_ecc_op_queue::{
 use crate::eccvm::co_ecc_op_queue::{MSMRow, ScalarMul};
 use ark_ec::AffineRepr;
 use ark_ec::CurveGroup;
+use ark_ff::Field;
 use ark_ff::One;
 use ark_ff::PrimeField;
 use ark_ff::Zero;
@@ -987,19 +988,19 @@ struct PointTablePrecomputationRow<
     C: CurveGroup<BaseField: PrimeField>,
     T: NoirWitnessExtensionProtocol<C::BaseField>,
 > {
-    s1: i32,
-    s2: i32,
-    s3: i32,
-    s4: i32,
-    s5: i32,
-    s6: i32,
-    s7: i32,
-    s8: i32,
+    s1: T::AcvmType,
+    s2: T::AcvmType,
+    s3: T::AcvmType,
+    s4: T::AcvmType,
+    s5: T::AcvmType,
+    s6: T::AcvmType,
+    s7: T::AcvmType,
+    s8: T::AcvmType,
     skew: bool,
     point_transition: bool,
-    pc: u32,
+    pc: T::AcvmType,
     round: u32,
-    scalar_sum: BigUint,
+    scalar_sum: T::AcvmType,
     precompute_accumulator: T::AcvmPoint<C>,
     precompute_double: T::AcvmPoint<C>,
 }
@@ -1009,19 +1010,19 @@ impl<C: CurveGroup<BaseField: PrimeField>, T: NoirWitnessExtensionProtocol<C::Ba
 {
     fn default() -> Self {
         Self {
-            s1: 0,
-            s2: 0,
-            s3: 0,
-            s4: 0,
-            s5: 0,
-            s6: 0,
-            s7: 0,
-            s8: 0,
+            s1: T::AcvmType::default(),
+            s2: T::AcvmType::default(),
+            s3: T::AcvmType::default(),
+            s4: T::AcvmType::default(),
+            s5: T::AcvmType::default(),
+            s6: T::AcvmType::default(),
+            s7: T::AcvmType::default(),
+            s8: T::AcvmType::default(),
             skew: false,
             point_transition: false,
-            pc: 0,
+            pc: T::AcvmType::default(),
             round: 0,
-            scalar_sum: BigUint::zero(),
+            scalar_sum: T::AcvmType::default(),
             precompute_accumulator: T::AcvmPoint::<C>::default(),
             precompute_double: T::AcvmPoint::<C>::default(),
         }
@@ -1054,7 +1055,10 @@ impl<C: CurveGroup<BaseField: PrimeField>, T: NoirWitnessExtensionProtocol<C::Ba
 impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseField>>
     PointTablePrecomputationRow<C, T>
 {
-    fn compute_rows(msms: &[ScalarMul<T, C>]) -> Vec<PointTablePrecomputationRow<C, T>> {
+    fn compute_rows(
+        msms: &[ScalarMul<T, C>],
+        driver: &mut T,
+    ) -> eyre::Result<Vec<PointTablePrecomputationRow<C, T>>> {
         let num_rows_per_scalar = NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW;
         let num_precompute_rows = num_rows_per_scalar * msms.len() + 1;
         let mut precompute_state =
@@ -1065,47 +1069,87 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseF
 
         // current impl doesn't work if not 4
         assert_eq!(WNAF_DIGITS_PER_ROW, 4);
+        let mut wnaf_digits = Vec::with_capacity(msms.len() * NUM_WNAF_DIGITS_PER_SCALAR);
+        for msm in msms.iter() {
+            wnaf_digits.extend(msm.wnaf_digits);
+        }
 
-        msms.iter().enumerate().for_each(|(j, entry)| {
-            let slices = &entry.wnaf_digits;
-            let mut scalar_sum = BigUint::zero();
+        let precomputed = driver.compute_rows(&wnaf_digits)?;
+        let mut index = 0;
+        for (j, entry) in msms.iter().enumerate() {
+            let mut scalar_sum = T::AcvmType::default();
 
             for i in 0..num_rows_per_scalar {
-                let mut row = PointTablePrecomputationRow::<C, T>::default();
-                let slice0 = slices[i * WNAF_DIGITS_PER_ROW];
-                let slice1 = slices[i * WNAF_DIGITS_PER_ROW + 1];
-                let slice2 = slices[i * WNAF_DIGITS_PER_ROW + 2];
-                let slice3 = slices[i * WNAF_DIGITS_PER_ROW + 3];
+                let mut row = PointTablePrecomputationRow {
+                    s1: precomputed[index].0[0],
+                    s2: precomputed[index].0[1],
+                    s3: precomputed[index].0[2],
+                    s4: precomputed[index].0[3],
+                    s5: precomputed[index].0[4],
+                    s6: precomputed[index].0[5],
+                    s7: precomputed[index].0[6],
+                    s8: precomputed[index].0[7],
+                    ..Default::default()
+                };
+                // let slice0 = slices[i * WNAF_DIGITS_PER_ROW];
+                // let slice1 = slices[i * WNAF_DIGITS_PER_ROW + 1];
+                // let slice2 = slices[i * WNAF_DIGITS_PER_ROW + 2];
+                // let slice3 = slices[i * WNAF_DIGITS_PER_ROW + 3];
 
-                let slice0base2 = (slice0 + 15) / 2;
-                let slice1base2 = (slice1 + 15) / 2;
-                let slice2base2 = (slice2 + 15) / 2;
-                let slice3base2 = (slice3 + 15) / 2;
+                // let slice0base2 = (slice0 + 15) / 2;
+                // let slice1base2 = (slice1 + 15) / 2;
+                // let slice2base2 = (slice2 + 15) / 2;
+                // let slice3base2 = (slice3 + 15) / 2;
+
+                /*    let mut slice0base2 = slice0; // + 15) / 2;
+                driver.add_assign_with_public(C::BaseField::from(15), &mut slice0base2);
+                slice0base2 = driver.mul_with_public(
+                    C::BaseField::from(2)
+                        .inverse()
+                        .expect("2 should be invertible"),
+                    slice0base2,
+                );
+                let mut slice1base2 = slice1; // + 15) / 2;
+                driver.add_assign_with_public(C::BaseField::from(15), &mut slice1base2);
+                slice1base2 = driver.mul_with_public(
+                    C::BaseField::from(2)
+                        .inverse()
+                        .expect("2 should be invertible"),
+                    slice1base2,
+                );
+                let mut slice2base2 = slice2; // + 15) / 2;
+                driver.add_assign_with_public(C::BaseField::from(15), &mut slice2base2);
+                slice2base2 = driver.mul_with_public(
+                    C::BaseField::from(2)
+                        .inverse()
+                        .expect("2 should be invertible"),
+                    slice2base2,
+                );
+                let mut slice3base2 = slice3; // + 15) / 2;
+                driver.add_assign_with_public(C::BaseField::from(15), &mut slice3base2);
+                slice3base2 = driver.mul_with_public(
+                    C::BaseField::from(2)
+                        .inverse()
+                        .expect("2 should be invertible"),
+                    slice3base2,
+                ); */
 
                 // Convert into 2-bit chunks
-                row.s1 = slice0base2 >> 2;
-                row.s2 = slice0base2 & 3;
-                row.s3 = slice1base2 >> 2;
-                row.s4 = slice1base2 & 3;
-                row.s5 = slice2base2 >> 2;
-                row.s6 = slice2base2 & 3;
-                row.s7 = slice3base2 >> 2;
-                row.s8 = slice3base2 & 3;
 
                 let last_row = i == num_rows_per_scalar - 1;
                 row.skew = if last_row { entry.wnaf_skew } else { false };
-                row.scalar_sum = scalar_sum.clone();
+                row.scalar_sum = scalar_sum;
 
                 // Ensure slice1 is positive for the first row of each scalar sum
-                let row_chunk = slice3 + (slice2 << 4) + (slice1 << 8) + (slice0 << 12);
-                let chunk_negative = row_chunk < 0;
+                let row_chunk = precomputed[index].1; //slice3 + (slice2 << 4) + (slice1 << 8) + (slice0 << 12);
+                let chunk_negative = precomputed[index].2;
+                let truthy = driver.mul_with_public(-C::BaseField::one(), row_chunk);
+                let summand = driver.cmux(chunk_negative, truthy, row_chunk)?;
 
-                scalar_sum <<= NUM_WNAF_DIGIT_BITS * WNAF_DIGITS_PER_ROW;
-                if chunk_negative {
-                    scalar_sum -= BigUint::from((-row_chunk) as u64);
-                } else {
-                    scalar_sum += BigUint::from(row_chunk as u64);
-                }
+                let factor = 1 << (NUM_WNAF_DIGIT_BITS * WNAF_DIGITS_PER_ROW);
+                scalar_sum = driver.mul_with_public(C::BaseField::from(factor), scalar_sum);
+                // scalar_sum <<= NUM_WNAF_DIGIT_BITS * WNAF_DIGITS_PER_ROW;
+                driver.add_assign(&mut scalar_sum, summand);
 
                 row.round = i as u32;
                 row.point_transition = last_row;
@@ -1124,8 +1168,9 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseF
                 row.precompute_accumulator =
                     entry.precomputed_table[POINT_TABLE_SIZE - 1 - i].to_owned();
                 precompute_state[j * num_rows_per_scalar + i + 1] = row;
+                index += 1;
             }
-        });
+        }
         // precompute_state
         todo!("Only after scalarmul is implemented")
     }

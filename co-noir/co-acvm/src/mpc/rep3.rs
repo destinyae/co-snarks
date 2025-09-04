@@ -16,6 +16,7 @@ use mpc_core::protocols::rep3::{
     network::Rep3NetworkExt, pointshare, yao,
 };
 use mpc_core::protocols::rep3_ring::gadgets::sort::{radix_sort_fields, radix_sort_fields_vec_by};
+use mpc_core::protocols::rep3_ring::lut::Rep3CurveLookupTable;
 use mpc_core::{
     lut::LookupTableProvider, protocols::rep3::Rep3PrimeFieldShare,
     protocols::rep3_ring::lut::Rep3LookupTable,
@@ -351,6 +352,7 @@ fn get_base_powers<const NUM_SLICES: usize>(base: u64) -> [BigUint; NUM_SLICES] 
 
 impl<'a, F: PrimeField, N: Network> NoirWitnessExtensionProtocol<F> for Rep3AcvmSolver<'a, F, N> {
     type Lookup = Rep3LookupTable<F>;
+    type CurveLookup<C: CurveGroup<BaseField = F>> = Rep3CurveLookupTable<C>;
 
     type ArithmeticShare = Rep3PrimeFieldShare<F>;
 

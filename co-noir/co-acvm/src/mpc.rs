@@ -20,6 +20,7 @@ fn downcast<A: 'static, B: 'static>(a: &A) -> Option<&B> {
 /// The operations are generic over public and private (i.e., secret-shared) inputs.
 pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     type Lookup: LookupTableProvider<F>;
+    type CurveLookup<C: CurveGroup<BaseField = F>>: LookupTableProvider<C>;
     type ArithmeticShare: Clone;
     type OtherArithmeticShare<C: CurveGroup<BaseField = F>>: Clone;
     /// A type representing the values encountered during Noir compilation. It should at least contain public field elements and shared values.
@@ -98,7 +99,7 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     fn add_many(&self, a: &[Self::AcvmType], b: &[Self::AcvmType]) -> Vec<Self::AcvmType> {
         a.iter()
             .zip(b.iter())
-            .map(|(a, b)| self.add(a.clone(), b.clone()))
+            .map(|(a, b)| self.add(*a, *b))
             .collect()
     }
 
@@ -125,7 +126,7 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     fn sub_many(&self, a: &[Self::AcvmType], b: &[Self::AcvmType]) -> Vec<Self::AcvmType> {
         a.iter()
             .zip(b.iter())
-            .map(|(a, b)| self.sub(a.clone(), b.clone()))
+            .map(|(a, b)| self.sub(*a, *b))
             .collect()
     }
 
@@ -151,7 +152,7 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         public
             .iter()
             .zip(shared.iter())
-            .map(|(public, shared)| self.mul_with_public(*public, shared.clone()))
+            .map(|(public, shared)| self.mul_with_public(*public, *shared))
             .collect()
     }
 
@@ -232,6 +233,14 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         values: Vec<Self::AcvmType>,
     ) -> <Self::Lookup as LookupTableProvider<F>>::LutType;
 
+    ///TODO
+    fn init_lut_by_acvm_point<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        values: Vec<Self::AcvmPoint<C>>,
+    ) -> <Self::CurveLookup<C> as LookupTableProvider<C>>::LutType {
+        todo!()
+    }
+
     /// Wrapper around reading from a LUT by the [`Self::AcvmType`] as this can either be a
     /// public or a shared read.
     fn read_lut_by_acvm_type(
@@ -240,12 +249,30 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         lut: &<Self::Lookup as LookupTableProvider<F>>::LutType,
     ) -> eyre::Result<Self::AcvmType>;
 
+    ///TODO
+    fn read_lut_by_acvm_point<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        index: Self::AcvmType,
+        lut: &<Self::CurveLookup<C> as LookupTableProvider<C>>::LutType,
+    ) -> eyre::Result<Self::AcvmPoint<C>> {
+        todo!()
+    }
+
     /// Reads from multiple public LUTs.
     fn read_from_public_luts(
         &mut self,
         index: Self::AcvmType,
         luts: &[Vec<F>],
     ) -> eyre::Result<Vec<Self::AcvmType>>;
+
+    ///TODO
+    fn read_from_public_curve_luts<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        index: Self::AcvmType,
+        luts: &[Vec<C>],
+    ) -> eyre::Result<Vec<Self::AcvmPoint<C>>> {
+        todo!()
+    }
 
     /// Wrapper around writing a value to a LUT. The index and the value can be shared or public.
     fn write_lut_by_acvm_type(
@@ -255,6 +282,16 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         lut: &mut <Self::Lookup as LookupTableProvider<F>>::LutType,
     ) -> eyre::Result<()>;
 
+    ///TODO
+    fn write_lut_by_acvm_point<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        index: Self::AcvmType,
+        value: Self::AcvmPoint<C>,
+        lut: &mut <Self::CurveLookup<C> as LookupTableProvider<C>>::LutType,
+    ) -> eyre::Result<()> {
+        todo!()
+    }
+
     /// Returns the size of a lut
     fn get_length_of_lut(lut: &<Self::Lookup as LookupTableProvider<F>>::LutType) -> usize;
 
@@ -262,6 +299,13 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     fn get_public_lut(
         lut: &<Self::Lookup as LookupTableProvider<F>>::LutType,
     ) -> eyre::Result<&Vec<F>>;
+
+    /// Returns the LUT as a vector of fields if the table is shared
+    fn get_shared_lut(
+        lut: &<Self::Lookup as LookupTableProvider<F>>::LutType,
+    ) -> eyre::Result<&Vec<Self::AcvmType>> {
+        todo!()
+    }
 
     /// Returns true if the LUT is public
     fn is_public_lut(lut: &<Self::Lookup as LookupTableProvider<F>>::LutType) -> bool;
@@ -652,6 +696,15 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     fn convert_fields<C: CurveGroup<BaseField = F>>(
         a: &[Self::AcvmType],
     ) -> eyre::Result<Vec<Self::OtherAcvmType<C>>> {
+        todo!()
+    }
+
+    /// TODO
+    #[expect(clippy::type_complexity)]
+    fn compute_rows(
+        &mut self,
+        wnaf_digits: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<([Self::AcvmType; 8], Self::AcvmType, Self::AcvmType)>> {
         todo!()
     }
 }
