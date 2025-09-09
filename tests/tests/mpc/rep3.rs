@@ -1484,6 +1484,121 @@ mod field_share {
     }
 
     #[test]
+    fn rep3_compute_wnaf_digits() {
+        const VEC_SIZE: usize = 10;
+        const TOTAL_BIT_SIZE: usize = 32;
+
+        const NUM_SCALAR_BITS: usize = 128; // The length of scalars handled by the ECCVVM
+        const NUM_WNAF_DIGIT_BITS: usize = 4; // Scalars are decompose into base 16 in wNAF form
+        const NUM_WNAF_DIGITS_PER_SCALAR: usize = NUM_SCALAR_BITS / NUM_WNAF_DIGIT_BITS; // 32
+        const WNAF_MASK: u64 = (1 << NUM_WNAF_DIGIT_BITS) - 1;
+
+        let nets = LocalNetwork::new_3_parties();
+        let mut rng = thread_rng();
+        let mask: BigUint = (BigUint::one() << TOTAL_BIT_SIZE) - BigUint::one();
+        let x = (0..VEC_SIZE)
+            .map(|_| {
+                let res = BigUint::from(ark_bn254::Fr::rand(&mut rng)) & &mask;
+                ark_bn254::Fr::from(res)
+            })
+            .collect_vec();
+        let x_shares = rep3::share_field_elements(&x, &mut rng);
+
+        let mut should_result = Vec::with_capacity(
+            VEC_SIZE * NUM_WNAF_DIGITS_PER_SCALAR + VEC_SIZE * (NUM_WNAF_DIGITS_PER_SCALAR - 1),
+        );
+        let mut should_result_pos = Vec::with_capacity(
+            VEC_SIZE * NUM_WNAF_DIGITS_PER_SCALAR + VEC_SIZE * (NUM_WNAF_DIGITS_PER_SCALAR - 1),
+        );
+
+        let compute_wnaf_digits = |mut scalar: BigUint| -> (
+            [i32; NUM_WNAF_DIGITS_PER_SCALAR],
+            [bool; NUM_WNAF_DIGITS_PER_SCALAR],
+        ) {
+            let mut output = [0; NUM_WNAF_DIGITS_PER_SCALAR];
+            let mut pos_output = [true; NUM_WNAF_DIGITS_PER_SCALAR];
+            let mut previous_slice = 0;
+            const BORROW_CONSTANT: i32 = 1 << NUM_WNAF_DIGIT_BITS;
+
+            for i in 0..NUM_WNAF_DIGITS_PER_SCALAR {
+                let raw_slice = &scalar & BigUint::from(WNAF_MASK);
+                let is_even = (&raw_slice & BigUint::one()) == BigUint::zero();
+                let mut wnaf_slice = if let Some(&digit) = raw_slice.to_u32_digits().first() {
+                    digit as i32
+                } else {
+                    0
+                };
+
+                if i == 0 && is_even {
+                    wnaf_slice += 1;
+                } else if is_even {
+                    previous_slice -= BORROW_CONSTANT;
+
+                    wnaf_slice += 1;
+                }
+
+                if i > 0 {
+                    if previous_slice < 0 {
+                        pos_output[NUM_WNAF_DIGITS_PER_SCALAR - i] = false;
+                    }
+                    output[NUM_WNAF_DIGITS_PER_SCALAR - i] = (previous_slice + 15) / 2;
+                }
+                previous_slice = wnaf_slice;
+
+                scalar >>= NUM_WNAF_DIGIT_BITS;
+            }
+
+            assert!(scalar.is_zero());
+            output[0] = (previous_slice + 15) / 2;
+            pos_output[0] = previous_slice > 0;
+
+            (output, pos_output)
+        };
+        for x in x.into_iter() {
+            let x: BigUint = x.into();
+            let (mut wnaf_digits, mut neg_output) = compute_wnaf_digits(x);
+            wnaf_digits.reverse();
+            neg_output.reverse();
+            should_result.extend(wnaf_digits.iter().map(|&d| ark_bn254::Fr::from(d as u64)));
+            should_result_pos.extend(neg_output);
+        }
+
+        let should_result_neg: Vec<ark_bn254::Fr> = should_result_pos
+            .iter()
+            .map(|x| {
+                if *x {
+                    ark_bn254::Fr::one()
+                } else {
+                    ark_bn254::Fr::zero()
+                }
+            })
+            .collect();
+
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        let (tx3, rx3) = mpsc::channel();
+
+        for (net, tx, x) in izip!(nets.into_iter(), [tx1, tx2, tx3], x_shares.into_iter(),) {
+            std::thread::spawn(move || {
+                let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+
+                let decomposed =
+                    yao::compute_wnaf_digits_many(&x, &net, &mut state, TOTAL_BIT_SIZE).unwrap();
+                tx.send(decomposed)
+            });
+        }
+        let result1 = rx1.recv().unwrap();
+        let result2 = rx2.recv().unwrap();
+        let result3 = rx3.recv().unwrap();
+        let is_result = rep3::combine_field_elements(&result1, &result2, &result3);
+        let is_result_values: Vec<_> = is_result.iter().step_by(2).cloned().collect();
+        let is_result_pos: Vec<_> = is_result.iter().skip(1).step_by(2).cloned().collect();
+
+        assert_eq!(is_result_values, should_result);
+        assert_eq!(is_result_pos, should_result_neg);
+    }
+
+    #[test]
     fn rep3_slice_and_xor_rotated() {
         const VEC_SIZE: usize = 10;
         const TOTAL_BIT_SIZE: usize = 32;
@@ -2518,6 +2633,119 @@ mod field_share {
             rep3_mod_red(a, b);
         }
     }
+
+    // fn rep3_bin_sub(a: i32, b: i32) {
+    //     let nets = LocalNetwork::new_3_parties();
+    //     let should_result: i32 = a.wrapping_sub(b);
+    //     println!(
+    //         "a: {a}, b: {b}, should_result: {should_result}, binary: {:b}",
+    //         should_result
+    //     );
+    //     let a = ark_bn254::Fr::from(a);
+    //     let b = ark_bn254::Fr::from(b);
+    //     let (tx1, rx1) = mpsc::channel();
+    //     let (tx2, rx2) = mpsc::channel();
+    //     let (tx3, rx3) = mpsc::channel();
+
+    //     let [net1, net2, net3] = nets;
+
+    //     // Both Garblers
+    //     for (net, tx) in izip!([net2, net3], [tx2, tx3]) {
+    //         std::thread::spawn(move || {
+    //             let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+    //             let mut garbler = Rep3Garbler::new(&net, &mut state);
+    //             let x_ = garbler.encode_field(a);
+    //             let y_ = garbler.encode_field(b);
+    //             let n_bits = ark_bn254::Fr::MODULUS_BIT_SIZE as usize;
+
+    //             // This is without OT, just a simulation
+    //             garbler.add_bundle_to_circuit(&x_.evaluator_wires);
+    //             garbler.add_bundle_to_circuit(&y_.evaluator_wires);
+
+    //             let circuit_output = GarbledCircuits::bin_subtraction(
+    //                 &mut garbler,
+    //                 x_.garbler_wires.wires(),
+    //                 y_.garbler_wires.wires(),
+    //             )
+    //             .unwrap();
+
+    //             let mut circuit_output_flat = circuit_output.0;
+    //             circuit_output_flat.push(circuit_output.1);
+
+    //             let mut res = Vec::new();
+    //             let output = garbler.output_all_parties(&circuit_output_flat).unwrap();
+
+    //             res.push(GCUtils::bits_to_field::<ark_bn254::Fr>(&output[..n_bits]).unwrap());
+    //             res.push(GCUtils::bits_to_field::<ark_bn254::Fr>(&output[n_bits..]).unwrap());
+
+    //             tx.send(res)
+    //         });
+    //     }
+
+    //     // The evaluator (ID0)
+    //     std::thread::spawn(move || {
+    //         let _state = Rep3State::new(&net1, A2BType::default()).unwrap(); // DONT REMOVE
+    //         let mut evaluator = Rep3Evaluator::new(&net1);
+    //         let n_bits = ark_bn254::Fr::MODULUS_BIT_SIZE as usize;
+
+    //         // This is without OT, just a simulation
+    //         evaluator.receive_circuit().unwrap();
+    //         let x_ = evaluator.receive_bundle_from_circuit(n_bits).unwrap();
+    //         let y_ = evaluator.receive_bundle_from_circuit(n_bits).unwrap();
+
+    //         let circuit_output =
+    //             GarbledCircuits::bin_subtraction(&mut evaluator, x_.wires(), y_.wires()).unwrap();
+    //         let mut circuit_output_flat = circuit_output.0;
+    //         circuit_output_flat.push(circuit_output.1);
+
+    //         let mut res = Vec::new();
+    //         let output = evaluator.output_all_parties(&circuit_output_flat).unwrap();
+    //         println!("output: {:?}", output);
+
+    //         res.push(GCUtils::bits_to_field::<ark_bn254::Fr>(&output[..n_bits]).unwrap());
+    //         res.push(GCUtils::bits_to_field::<ark_bn254::Fr>(&output[n_bits..]).unwrap());
+
+    //         tx1.send(res)
+    //     });
+
+    //     let result1 = rx1.recv().unwrap();
+    //     let result2 = rx2.recv().unwrap();
+    //     let result3 = rx3.recv().unwrap();
+    //     println!("{result1:?}");
+    //     println!("{result2:?}");
+    //     println!("{result3:?}");
+    //     // let result1_biguint: BigUint = result1.into();
+    //     // let result2_biguint: BigUint = result2.0.into();
+    //     // let result3_biguint: BigUint = result3.0.into();
+    //     // let mut result1_u64: i32 = result1_biguint.to_u32_digits()[0].try_into().unwrap();
+    //     // let mut result2_u64: i32 = result2_biguint.to_u32_digits()[0].try_into().unwrap();
+    //     // let mut result3_u64: i32 = result3_biguint.to_u32_digits()[0].try_into().unwrap();
+    //     // if result1.1 == ark_bn254::Fr::from(1u64) {
+    //     //     result1_u64 *= -1;
+    //     // }
+    //     // if result2.1 == ark_bn254::Fr::from(1u64) {
+    //     //     result2_u64 *= -1;
+    //     // }
+    //     // if result3.1 == ark_bn254::Fr::from(1u64) {
+    //     //     result3_u64 *= -1;
+    //     // }
+    //     // assert_eq!(result1_u64, should_result);
+    //     // assert_eq!(result2_u64, should_result);
+    //     // assert_eq!(result3_u64, should_result);
+    // }
+
+    // #[test]
+    // fn test_rep3_bin_sub() {
+    //     const TEST_RUN: usize = 5;
+    //     for _ in 0..TEST_RUN {
+    //         let mut rng = thread_rng();
+    //         let a: i32 = rng.gen();
+    //         let b: i32 = rng.gen();
+    //         let a = if a < 0 { -a } else { a };
+    //         let b = if b < 0 { -b } else { b };
+    //         rep3_bin_sub(a as i32, b as i32);
+    //     }
+    // }
 
     fn rep3_slicing_using_arbitrary_base(
         a: ark_bn254::Fr,

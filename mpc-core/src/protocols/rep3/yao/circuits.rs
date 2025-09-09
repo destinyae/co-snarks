@@ -228,7 +228,7 @@ impl GarbledCircuits {
     /// Binary subtraction. Returns the result and whether it underflowed.
     /// I.e., calculates 2^k + x1 - x2
     #[expect(clippy::type_complexity)]
-    fn bin_subtraction<G: FancyBinary>(
+    pub fn bin_subtraction<G: FancyBinary>(
         g: &mut G,
         xs: &[G::Item],
         ys: &[G::Item],
@@ -2393,7 +2393,7 @@ impl GarbledCircuits {
             for bit in resized.iter() {
                 results.extend(Self::compose_field_element::<_, F>(
                     g,
-                    &[bit.clone()],
+                    std::slice::from_ref(bit),
                     rands.next().unwrap(),
                 )?);
             }
@@ -2401,7 +2401,7 @@ impl GarbledCircuits {
                 for bit in resized.iter() {
                     results.extend(Self::compose_field_element::<_, F>(
                         g,
-                        &[bit.clone()],
+                        std::slice::from_ref(bit),
                         rands.next().unwrap(),
                     )?);
                 }
@@ -2411,7 +2411,7 @@ impl GarbledCircuits {
                 for bit in rotated.iter() {
                     results.extend(Self::compose_field_element::<_, F>(
                         g,
-                        &[bit.clone()],
+                        std::slice::from_ref(bit),
                         rands.next().unwrap(),
                     )?);
                 }
@@ -2768,7 +2768,7 @@ impl GarbledCircuits {
                         for _ in 0..8 - counter {
                             results.extend(Self::compose_field_element::<_, F>(
                                 g,
-                                &[zero.clone()],
+                                std::slice::from_ref(&zero),
                                 rands.next().unwrap(),
                             )?);
                         }
@@ -3869,6 +3869,148 @@ impl GarbledCircuits {
             Err(e) => return Err(G::Error::from(FancyError::from(e))),
         };
         Ok(result)
+    }
+
+    pub(crate) fn compute_wnaf_digits_many<G: FancyBinary + FancyBinaryConstant, F: PrimeField>(
+        g: &mut G,
+        wires_x1: &BinaryBundle<G::Item>,
+        wires_x2: &BinaryBundle<G::Item>,
+        wires_c: &BinaryBundle<G::Item>,
+        total_output_bitlen_per_field: usize,
+    ) -> Result<BinaryBundle<G::Item>, G::Error> {
+        let input_bitlen = F::MODULUS_BIT_SIZE as usize;
+        debug_assert_eq!(wires_x1.size(), wires_x2.size());
+        let length = wires_x1.size();
+        debug_assert_eq!(length % 2, 0);
+        // let num_decomps_per_field = total_output_bitlen_per_field.div_ceil(base_bit);
+        let num_inputs = (length / 2) / input_bitlen;
+
+        let total_output_elements = 2 * 32 * num_inputs;
+        // debug_assert_eq!(wires_c.size(), total_output_elements * input_bitlen);
+        // debug_assert_eq!((length / 2) % input_bitlen, 0);
+
+        let mut results = Vec::with_capacity(wires_c.size());
+
+        for (chunk_x1, chunk_x2, chunk_c) in izip!(
+            wires_x1.wires().chunks(input_bitlen),
+            wires_x2.wires().chunks(input_bitlen),
+            wires_c
+                .wires()
+                .chunks(input_bitlen * 32 + 32 * input_bitlen),
+        ) {
+            let value = Self::compute_wnaf_digits::<G, F>(
+                g,
+                chunk_x1,
+                chunk_x2,
+                chunk_c,
+                total_output_bitlen_per_field,
+            )?;
+
+            results.extend(value);
+        }
+        Ok(BinaryBundle::new(results))
+    }
+
+    /// TODO FLORIN
+    fn compute_wnaf_digits<G: FancyBinary + FancyBinaryConstant, F: PrimeField>(
+        g: &mut G,
+        wires_a: &[G::Item],
+        wires_b: &[G::Item],
+        wires_c: &[G::Item],
+        total_output_bitlen: usize,
+    ) -> Result<Vec<G::Item>, G::Error> {
+        const NUM_SCALAR_BITS: usize = 128; // The length of scalars handled by the ECCVVM
+        const NUM_WNAF_DIGIT_BITS: usize = 4; // Scalars are decompose into base 16 in wNAF form
+        const NUM_WNAF_DIGITS_PER_SCALAR: usize = NUM_SCALAR_BITS / NUM_WNAF_DIGIT_BITS; // 32
+        let input_bitlen = F::MODULUS_BIT_SIZE as usize;
+        let mut rands = wires_c.chunks(input_bitlen);
+        // TODO FLORIN: add checks
+        // let num_decomps_per_field = total_output_bitlen.div_ceil(decompose_bitlen);
+        // debug_assert_eq!(wires_a.len(), wires_b.len());
+        // let input_bitlen = wires_a.len();
+        // debug_assert_eq!(input_bitlen, F::MODULUS_BIT_SIZE as usize);
+        // debug_assert!(input_bitlen >= total_output_bitlen);
+        // debug_assert!(decompose_bitlen <= total_output_bitlen);
+        // debug_assert_eq!(wires_c.len(), input_bitlen * num_decomps_per_field);
+        let mut input_bits =
+            Self::adder_mod_p_with_output_size::<_, F>(g, wires_a, wires_b, total_output_bitlen)?;
+        let input_bitlen = input_bits.len();
+        let mut previous_slice = vec![g.const_zero()?];
+        previous_slice.resize(5, g.const_zero()?);
+        let borrow_constant = [false, false, false, false, true]; // 16 in binary
+        let constant_fifteen = Self::constant_bundle_from_usize(g, 15, 5)?;
+
+        let mut results = Vec::with_capacity(wires_c.len());
+        // let mut output = Vec::new();
+        // let mut overflow_bits = Vec::new();
+
+        for i in 0..NUM_WNAF_DIGITS_PER_SCALAR {
+            let raw_slice = &input_bits[..4];
+            let is_even = g.negate(&raw_slice[0])?; //(&raw_slice & const_one) == BigUint::zero();
+            let mut is_even = vec![is_even];
+            is_even.resize(raw_slice.len(), g.const_zero()?);
+
+            let mut wnaf_slice = raw_slice.to_owned();
+            let mut overflow_bit = g.const_zero()?;
+
+            if i == 0 {
+                wnaf_slice = Self::bin_addition_no_carry(g, &wnaf_slice, &is_even)?;
+            } else {
+                wnaf_slice = Self::bin_addition_no_carry(g, &wnaf_slice, &is_even)?;
+                let mut subtrahend = Self::bin_mul_with_public(g, &is_even, &borrow_constant)?;
+                subtrahend.resize(5, g.const_zero()?);
+                (previous_slice, overflow_bit) =
+                    Self::bin_subtraction(g, &previous_slice, &subtrahend)?;
+            }
+            previous_slice = Self::bin_addition_no_carry(g, &previous_slice, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift
+            previous_slice.remove(0);
+            previous_slice.push(g.const_zero()?);
+            if i > 0 {
+                results.extend(Self::compose_field_element::<_, F>(
+                    g,
+                    &previous_slice,
+                    rands.next().unwrap(),
+                )?);
+                results.extend(Self::compose_field_element::<_, F>(
+                    g,
+                    &[overflow_bit],
+                    rands.next().unwrap(),
+                )?);
+                // output.push(previous_slice.clone());
+                // overflow_bits.push(overflow_bit);
+            }
+            previous_slice = wnaf_slice;
+            previous_slice.resize(5, g.const_zero()?);
+
+            input_bits = input_bits[4..].to_vec();
+            input_bits.resize(input_bitlen, g.const_zero()?);
+        }
+        // output.push(previous_slice);
+        // output.reverse();
+        previous_slice = Self::bin_addition_no_carry(g, &previous_slice, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift
+        previous_slice.remove(0);
+        previous_slice.push(g.const_zero()?);
+        let const_one = g.const_one()?;
+        results.extend(Self::compose_field_element::<_, F>(
+            g,
+            &previous_slice,
+            rands.next().unwrap(),
+        )?);
+        results.extend(Self::compose_field_element::<_, F>(
+            g,
+            &[const_one],
+            rands.next().unwrap(),
+        )?);
+
+        // for (xs, ys) in izip!(
+        //     input_bits.chunks(decompose_bitlen),
+        //     wires_c.chunks(input_bitlen),
+        // ) {
+        //     let result = Self::compose_field_element::<_, F>(g, xs, ys)?;
+        //     results.extend(result);
+        // }
+
+        Ok(results)
     }
 }
 
