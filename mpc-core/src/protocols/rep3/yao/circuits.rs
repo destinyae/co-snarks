@@ -3883,9 +3883,7 @@ impl GarbledCircuits {
         let length = wires_x1.size();
         debug_assert_eq!(length % 2, 0);
         // let num_decomps_per_field = total_output_bitlen_per_field.div_ceil(base_bit);
-        let num_inputs = (length / 2) / input_bitlen;
 
-        let total_output_elements = 2 * 32 * num_inputs;
         // debug_assert_eq!(wires_c.size(), total_output_elements * input_bitlen);
         // debug_assert_eq!((length / 2) % input_bitlen, 0);
 
@@ -3894,9 +3892,14 @@ impl GarbledCircuits {
         for (chunk_x1, chunk_x2, chunk_c) in izip!(
             wires_x1.wires().chunks(input_bitlen),
             wires_x2.wires().chunks(input_bitlen),
-            wires_c
-                .wires()
-                .chunks(input_bitlen * 32 + 32 * input_bitlen),
+            wires_c.wires().chunks(
+                32 * input_bitlen
+                    + 32 * input_bitlen
+                    + input_bitlen
+                    + 8 * 8 * input_bitlen
+                    + 8 * input_bitlen
+                    + 8 * input_bitlen
+            ),
         ) {
             let value = Self::compute_wnaf_digits::<G, F>(
                 g,
@@ -3922,6 +3925,9 @@ impl GarbledCircuits {
         const NUM_SCALAR_BITS: usize = 128; // The length of scalars handled by the ECCVVM
         const NUM_WNAF_DIGIT_BITS: usize = 4; // Scalars are decompose into base 16 in wNAF form
         const NUM_WNAF_DIGITS_PER_SCALAR: usize = NUM_SCALAR_BITS / NUM_WNAF_DIGIT_BITS; // 32
+        const WNAF_DIGITS_PER_ROW: usize = 4;
+        let num_rows_per_scalar = NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW;
+
         let input_bitlen = F::MODULUS_BIT_SIZE as usize;
         let mut rands = wires_c.chunks(input_bitlen);
         // TODO FLORIN: add checks
@@ -3943,6 +3949,15 @@ impl GarbledCircuits {
         let mut results = Vec::with_capacity(wires_c.len());
         // let mut output = Vec::new();
         // let mut overflow_bits = Vec::new();
+        let is_even = g.negate(&input_bits[0])?; //Gives us whether the input is odd or even
+
+        results.extend(Self::compose_field_element::<_, F>(
+            g,
+            &[is_even],
+            rands.next().unwrap(),
+        )?);
+        let mut outputs = Vec::with_capacity(2); // TODO FLORIN
+        let mut underflow_bits = Vec::with_capacity(2); // TODO FLORIN
 
         for i in 0..NUM_WNAF_DIGITS_PER_SCALAR {
             let raw_slice = &input_bits[..4];
@@ -3951,7 +3966,7 @@ impl GarbledCircuits {
             is_even.resize(raw_slice.len(), g.const_zero()?);
 
             let mut wnaf_slice = raw_slice.to_owned();
-            let mut overflow_bit = g.const_zero()?;
+            let mut underflow_bit = g.const_zero()?;
 
             if i == 0 {
                 wnaf_slice = Self::bin_addition_no_carry(g, &wnaf_slice, &is_even)?;
@@ -3959,25 +3974,35 @@ impl GarbledCircuits {
                 wnaf_slice = Self::bin_addition_no_carry(g, &wnaf_slice, &is_even)?;
                 let mut subtrahend = Self::bin_mul_with_public(g, &is_even, &borrow_constant)?;
                 subtrahend.resize(5, g.const_zero()?);
-                (previous_slice, overflow_bit) =
+                (previous_slice, underflow_bit) =
                     Self::bin_subtraction(g, &previous_slice, &subtrahend)?;
             }
-            previous_slice = Self::bin_addition_no_carry(g, &previous_slice, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift
-            previous_slice.remove(0);
-            previous_slice.push(g.const_zero()?);
+            // if reverse_index % 4 == 0 {
+
+            // } else if reverse_index % 4 == 3 {
+
+            // } else if reverse_index % 4 == 2 {
+
+            // } else {
+
+            // }
+
+            // previous_slice = Self::bin_addition_no_carry(g, &previous_slice, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift
+            // previous_slice.remove(0);
+            // previous_slice.push(g.const_zero()?);
             if i > 0 {
-                results.extend(Self::compose_field_element::<_, F>(
-                    g,
-                    &previous_slice,
-                    rands.next().unwrap(),
-                )?);
-                results.extend(Self::compose_field_element::<_, F>(
-                    g,
-                    &[overflow_bit],
-                    rands.next().unwrap(),
-                )?);
-                // output.push(previous_slice.clone());
-                // overflow_bits.push(overflow_bit);
+                // results.extend(Self::compose_field_element::<_, F>(
+                //     g,
+                //     &previous_slice,
+                //     rands.next().unwrap(),
+                // )?);
+                // results.extend(Self::compose_field_element::<_, F>(
+                //     g,
+                //     &[overflow_bit],
+                //     rands.next().unwrap(),
+                // )?);
+                outputs.push(previous_slice);
+                underflow_bits.push(underflow_bit);
             }
             previous_slice = wnaf_slice;
             previous_slice.resize(5, g.const_zero()?);
@@ -3985,30 +4010,94 @@ impl GarbledCircuits {
             input_bits = input_bits[4..].to_vec();
             input_bits.resize(input_bitlen, g.const_zero()?);
         }
-        // output.push(previous_slice);
-        // output.reverse();
-        previous_slice = Self::bin_addition_no_carry(g, &previous_slice, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift
-        previous_slice.remove(0);
-        previous_slice.push(g.const_zero()?);
-        let const_one = g.const_one()?;
-        results.extend(Self::compose_field_element::<_, F>(
-            g,
-            &previous_slice,
-            rands.next().unwrap(),
-        )?);
-        results.extend(Self::compose_field_element::<_, F>(
-            g,
-            &[const_one],
-            rands.next().unwrap(),
-        )?);
+        outputs.push(previous_slice);
+        underflow_bits.push(g.const_one()?);
 
-        // for (xs, ys) in izip!(
-        //     input_bits.chunks(decompose_bitlen),
-        //     wires_c.chunks(input_bitlen),
-        // ) {
-        //     let result = Self::compose_field_element::<_, F>(g, xs, ys)?;
-        //     results.extend(result);
-        // }
+        for i in 0..num_rows_per_scalar {
+            let slice0 = &outputs[i * WNAF_DIGITS_PER_ROW + 3];
+            let slice1 = &outputs[i * WNAF_DIGITS_PER_ROW + 2];
+            let slice2 = &outputs[i * WNAF_DIGITS_PER_ROW + 1];
+            let slice3 = &outputs[i * WNAF_DIGITS_PER_ROW];
+            let underflow0 = &underflow_bits[i * WNAF_DIGITS_PER_ROW + 3];
+            let underflow1 = &underflow_bits[i * WNAF_DIGITS_PER_ROW + 2];
+            let underflow2 = &underflow_bits[i * WNAF_DIGITS_PER_ROW + 1];
+            let underflow3 = &underflow_bits[i * WNAF_DIGITS_PER_ROW];
+
+            let mut slice0base2 = Self::bin_addition_no_carry(g, slice0, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift 
+            let mut slice1base2 = Self::bin_addition_no_carry(g, slice1, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift 
+            let mut slice2base2 = Self::bin_addition_no_carry(g, slice2, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift 
+            let mut slice3base2 = Self::bin_addition_no_carry(g, slice3, &constant_fifteen)?; // The results of this later get (x + 15) / 2. Since these are always even, we can just add 15 and shift 
+            for (slice, overflow) in [
+                (&mut slice3base2, underflow3),
+                (&mut slice2base2, underflow2),
+                (&mut slice1base2, underflow1),
+                (&mut slice0base2, underflow0),
+            ] {
+                slice.remove(0);
+                slice.push(g.const_zero()?);
+                results.extend(Self::compose_field_element::<_, F>(
+                    g,
+                    slice,
+                    rands.next().unwrap(),
+                )?);
+                results.extend(Self::compose_field_element::<_, F>(
+                    g,
+                    std::slice::from_ref(overflow),
+                    rands.next().unwrap(),
+                )?);
+            }
+            let mut row_s1 = slice0base2[2..].to_vec();
+            row_s1.extend([g.const_zero()?, g.const_zero()?]);
+            let row_s2 = slice0base2[0..2].to_vec();
+            let mut row_s3 = slice1base2[2..].to_vec();
+            row_s3.extend([g.const_zero()?, g.const_zero()?]);
+            let row_s4 = slice1base2[0..2].to_vec();
+            let mut row_s5 = slice2base2[2..].to_vec();
+            row_s5.extend([g.const_zero()?, g.const_zero()?]);
+            let row_s6 = slice2base2[0..2].to_vec();
+            let mut row_s7 = slice3base2[2..].to_vec();
+            row_s7.extend([g.const_zero()?, g.const_zero()?]);
+            let row_s8 = slice3base2[0..2].to_vec();
+            for row in [
+                row_s1, row_s2, row_s3, row_s4, row_s5, row_s6, row_s7, row_s8,
+            ] {
+                results.extend(Self::compose_field_element::<_, F>(
+                    g,
+                    &row,
+                    rands.next().unwrap(),
+                )?);
+            }
+
+            let mut slice2_shift4 = [vec![g.const_zero()?; 4], slice2.to_vec()].concat();
+            slice2_shift4.resize(32, slice2.last().cloned().unwrap_or(g.const_one()?));
+            let mut slice1_shift8 = [vec![g.const_zero()?; 8], slice1.to_vec()].concat();
+            slice1_shift8.resize(32, slice1.last().cloned().unwrap_or(g.const_one()?));
+            let mut slice0_shift12 = [vec![g.const_zero()?; 12], slice0.to_vec()].concat();
+            slice0_shift12.resize(32, slice0.last().cloned().unwrap_or(g.const_one()?));
+            let mut slice3_no_shift = slice3.to_vec();
+            slice3_no_shift.resize(32, slice3.last().cloned().unwrap_or(g.const_one()?));
+
+            // TODO FLORIN: optimize this
+            let row_chunk = Self::bin_addition_no_carry(g, &slice3_no_shift, &slice2_shift4)?;
+            let row_chunk = Self::bin_addition_no_carry(g, &row_chunk, &slice1_shift8)?;
+            let row_chunk = Self::bin_addition_no_carry(g, &row_chunk, &slice0_shift12)?;
+            let is_negative_value = row_chunk[31].clone();
+            let mut const_is_negative = vec![is_negative_value.clone()];
+            let is_negative: [_; 32] = core::array::from_fn(|_| is_negative_value.clone());
+            const_is_negative.resize(32, g.const_zero()?);
+            let row_chunk = Self::xor_many_as_wires(g, &row_chunk, &is_negative)?;
+            let row_chunk = Self::bin_addition_no_carry(g, &row_chunk, &const_is_negative)?;
+            results.extend(Self::compose_field_element::<_, F>(
+                g,
+                &row_chunk,
+                rands.next().unwrap(),
+            )?);
+            results.extend(Self::compose_field_element::<_, F>(
+                g,
+                &[is_negative_value],
+                rands.next().unwrap(),
+            )?);
+        }
 
         Ok(results)
     }

@@ -1479,7 +1479,7 @@ pub fn compute_wnaf_digits_many<F: PrimeField, N: Network>(
     state: &mut Rep3State,
     input_bitsize: usize,
 ) -> eyre::Result<Vec<Rep3PrimeFieldShare<F>>> {
-    let total_output_elements = input.len() * (32 + 32);
+    let total_output_elements = input.len() * (32 + 32 + 1 + 8 * 8 + 8 + 8);
 
     decompose_circuit_compose_blueprint!(
         &input,
