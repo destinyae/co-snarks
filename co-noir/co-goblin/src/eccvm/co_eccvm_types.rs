@@ -1,5 +1,5 @@
 use crate::eccvm::co_ecc_op_queue::{
-    CoECCOpQueue, CoEccvmOpsTable, CoEccvmRowTracker, CoUltraEccOpsTable, CoUltraOp, CoVMOperation,
+    CoECCOpQueue, CoEccvmOpsTable, CoUltraEccOpsTable, CoUltraOp, CoVMOperation,
 };
 use crate::eccvm::co_ecc_op_queue::{MSMRow, ScalarMul};
 use ark_ec::AffineRepr;
@@ -1091,6 +1091,18 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseF
                     s8: precomputed[index].0[7],
                     ..Default::default()
                 };
+
+                // TODO FLORIN: Maybe do this already in the garbled circuit
+
+                // row.s1 = slice0base2 >> 2;
+                // row.s2 = slice0base2 & 3;
+                // row.s3 = slice1base2 >> 2;
+                // row.s4 = slice1base2 & 3;
+                // row.s5 = slice2base2 >> 2;
+                // row.s6 = slice2base2 & 3;
+                // row.s7 = slice3base2 >> 2;
+                // row.s8 = slice3base2 & 3;
+
                 // let slice0 = slices[i * WNAF_DIGITS_PER_ROW];
                 // let slice1 = slices[i * WNAF_DIGITS_PER_ROW + 1];
                 // let slice2 = slices[i * WNAF_DIGITS_PER_ROW + 2];
@@ -1191,20 +1203,19 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseF
 // {
 //     let eccvm_ops = op_queue.get_eccvm_ops().to_vec();
 //     let number_of_muls = op_queue.get_number_of_muls();
-//     let transcript_rows =
-//         compute_rows::<C::CycleGroup, T, N>(&eccvm_ops, number_of_muls, )
-//             .expect("Failed to compute transcript rows");
+//     let transcript_rows = compute_rows::<C::CycleGroup, T, N>(&eccvm_ops, number_of_muls)
+//         .expect("Failed to compute transcript rows");
 //     let msms = op_queue.get_msms();
 //     let point_table_rows = PointTablePrecomputationRow::<C::CycleGroup, T>::compute_rows(
 //         &msms.iter().flat_map(|msm| msm.clone()).collect::<Vec<_>>(),
 //     );
-//     // let result = MSMRow::<C::CycleGroup, T>::compute_rows_msms(
-//     //     &msms,
-//     //     number_of_muls,
-//     //     op_queue.get_num_msm_rows(),
-//     //     net,
-//     //     state_,
-//     // );
+//     let result = MSMRow::<C::CycleGroup, T>::compute_rows_msms(
+//         &msms,
+//         number_of_muls,
+//         op_queue.get_num_msm_rows(),
+//         net,
+//         state_,
+//     );
 
 //     todo!()
 // }

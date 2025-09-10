@@ -1003,6 +1003,7 @@ impl<P: HonkCurve<TranscriptFieldType>> ECCOpQueue<P> {
         let compute_wnaf_digits = |mut scalar: BigUint| -> [i32; NUM_WNAF_DIGITS_PER_SCALAR] {
             let mut output = [0; NUM_WNAF_DIGITS_PER_SCALAR];
             let mut previous_slice = 0;
+            const BORROW_CONSTANT: i32 = 1 << NUM_WNAF_DIGIT_BITS;
 
             for i in 0..NUM_WNAF_DIGITS_PER_SCALAR {
                 let raw_slice = &scalar & BigUint::from(WNAF_MASK);
@@ -1016,7 +1017,6 @@ impl<P: HonkCurve<TranscriptFieldType>> ECCOpQueue<P> {
                 if i == 0 && is_even {
                     wnaf_slice += 1;
                 } else if is_even {
-                    const BORROW_CONSTANT: i32 = 1 << NUM_WNAF_DIGIT_BITS;
                     previous_slice -= BORROW_CONSTANT;
                     wnaf_slice += 1;
                 }

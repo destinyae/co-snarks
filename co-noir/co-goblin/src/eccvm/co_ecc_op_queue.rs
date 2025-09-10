@@ -7,6 +7,7 @@ use co_builder::TranscriptFieldType;
 use co_builder::prelude::HonkCurve;
 use co_builder::prelude::offset_generator;
 use common::{mpc::NoirUltraHonkProver, shared_polynomial::SharedPolynomial};
+use goblin::prelude::EccvmRowTracker;
 use goblin::{
     ADDITIONS_PER_ROW, NUM_WNAF_DIGIT_BITS, NUM_WNAF_DIGITS_PER_SCALAR, POINT_TABLE_SIZE,
     WNAF_MASK,
@@ -136,6 +137,9 @@ pub struct CoVMOperation<
     pub base_point: T::AcvmPoint<C>,
     pub z1: T::AcvmType, //TODO FLORIN: I think this does not have to be a binary share (It is a uint256 in bb)
     pub z2: T::AcvmType, //TODO FLORIN: I think this does not have to be a binary share (It is a uint256 in bb)
+    pub z1_is_zero: bool,
+    pub z2_is_zero: bool,
+    pub base_point_is_zero: bool,
     pub mul_scalar_full: T::OtherAcvmType<C>,
 }
 impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: PrimeField>> Clone
@@ -148,6 +152,9 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: Pri
             z1: self.z1,
             z2: self.z2,
             mul_scalar_full: self.mul_scalar_full,
+            z1_is_zero: self.z1_is_zero,
+            z2_is_zero: self.z2_is_zero,
+            base_point_is_zero: self.base_point_is_zero,
         }
     }
 }
@@ -183,103 +190,6 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: Pri
     }
 }
 
-#[derive(Debug)]
-pub struct CoEccvmRowTracker<
-    T: NoirWitnessExtensionProtocol<C::BaseField>,
-    C: CurveGroup<BaseField: PrimeField>,
-> {
-    pub cached_num_muls: T::AcvmType,
-    pub cached_active_msm_count: T::AcvmType,
-    pub num_transcript_rows: u32,
-    pub num_precompute_table_rows: T::AcvmType,
-    pub num_msm_rows: T::AcvmType,
-}
-impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: PrimeField>> Default
-    for CoEccvmRowTracker<T, C>
-{
-    fn default() -> Self {
-        Self {
-            cached_num_muls: T::AcvmType::default(),
-            cached_active_msm_count: T::AcvmType::default(),
-            num_transcript_rows: 0,
-            num_precompute_table_rows: T::AcvmType::default(),
-            num_msm_rows: T::AcvmType::default(),
-        }
-    }
-}
-
-impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: PrimeField>>
-    CoEccvmRowTracker<T, C>
-{
-    pub fn get_number_of_muls(&self, driver: &mut T) -> T::AcvmType {
-        driver.add(
-            self.cached_num_muls.to_owned(),
-            self.cached_active_msm_count.to_owned(),
-        )
-    }
-
-    pub fn num_eccvm_msm_rows(
-        msm_size: T::ArithmeticShare,
-        // id: <T::State as MpcState>::PartyID,
-    ) -> T::ArithmeticShare {
-        // let rows_per_wnaf_digit = (msm_size / ADDITIONS_PER_ROW)
-        //     + if msm_size % ADDITIONS_PER_ROW != 0 {
-        //         1
-        //     } else {
-        //         0
-        //     };
-        // let num_rows_for_all_rounds = (NUM_WNAF_DIGITS_PER_SCALAR + 1) * rows_per_wnaf_digit;
-        // let num_double_rounds = NUM_WNAF_DIGITS_PER_SCALAR - 1;
-        // T::add_with_public(
-        //     C::ScalarField::from(num_double_rounds as u32),
-        //     num_rows_for_all_rounds,
-        //     id,
-        // )
-        todo!()
-    }
-
-    pub fn num_eccvm_msm_rows_public(msm_size: usize) -> u32 {
-        let rows_per_wnaf_digit = (msm_size / ADDITIONS_PER_ROW)
-            + if msm_size % ADDITIONS_PER_ROW != 0 {
-                1
-            } else {
-                0
-            };
-        let num_rows_for_all_rounds = (NUM_WNAF_DIGITS_PER_SCALAR + 1) * rows_per_wnaf_digit;
-        let num_double_rounds = NUM_WNAF_DIGITS_PER_SCALAR - 1;
-        (num_rows_for_all_rounds + num_double_rounds) as u32
-    }
-
-    pub fn get_num_msm_rows(&self) -> T::AcvmType {
-        // let mut msm_rows = self.num_msm_rows as usize + 2;
-        // if self.cached_active_msm_count > 0 {
-        //     msm_rows += Self::num_eccvm_msm_rows(self.cached_active_msm_count as usize) as usize;
-        // }
-        // msm_rows
-        todo!()
-    }
-
-    pub fn get_num_rows(&self) -> T::AcvmType {
-        // let transcript_rows = self.num_transcript_rows as usize + 2;
-        // let mut msm_rows = self.num_msm_rows as usize + 2;
-        // let mut precompute_rows = self.num_precompute_table_rows as usize + 1;
-        // if self.cached_active_msm_count > 0 {
-        //     msm_rows += Self::num_eccvm_msm_rows(self.cached_active_msm_count as usize) as usize;
-        //     precompute_rows += Self::get_precompute_table_row_count_for_single_msm(
-        //         self.cached_active_msm_count as usize,
-        //     ) as usize;
-        // }
-        // std::cmp::max(transcript_rows, std::cmp::max(msm_rows, precompute_rows))
-        todo!()
-    }
-
-    pub fn get_precompute_table_row_count_for_single_msm(msm_count: T::AcvmType) -> T::AcvmType {
-        // let num_precompute_rows_per_scalar = NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW;
-        // (msm_count * num_precompute_rows_per_scalar) as u32
-        todo!()
-    }
-}
-
 pub struct CoECCOpQueue<
     T: NoirWitnessExtensionProtocol<C::BaseField>,
     C: CurveGroup<BaseField: PrimeField>,
@@ -289,13 +199,7 @@ pub struct CoECCOpQueue<
     pub(crate) accumulator: T::AcvmPoint<C>,
     pub(crate) eccvm_ops_reconstructed: Vec<CoVMOperation<T, C>>,
     pub ultra_ops_reconstructed: Vec<CoUltraOp<T, C>>,
-    pub(crate) eccvm_row_tracker: CoEccvmRowTracker<T, C>,
-}
-
-pub struct test<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: PrimeField>>
-{
-    pub(crate) accumulator: T::AcvmPoint<C>,
-    pub test: T::AcvmType,
+    pub(crate) eccvm_row_tracker: EccvmRowTracker,
 }
 
 impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: PrimeField>>
@@ -359,22 +263,22 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: Pri
     /**
      * @brief Get the number of rows in the 'msm' column section, for all msms in the circuit
      */
-    pub fn get_num_msm_rows(&self) -> T::AcvmType {
+    pub fn get_num_msm_rows(&self) -> usize {
         self.eccvm_row_tracker.get_num_msm_rows()
     }
 
     /**
      * @brief Get the number of rows for the current ECCVM circuit
      */
-    pub fn get_num_rows(&self) -> T::AcvmType {
+    pub fn get_num_rows(&self) -> usize {
         self.eccvm_row_tracker.get_num_rows()
     }
 
     /**
      * @brief get number of muls for the current ECCVM circuit
      */
-    pub fn get_number_of_muls(&self, driver: &mut T) -> T::AcvmType {
-        self.eccvm_row_tracker.get_number_of_muls(driver)
+    pub fn get_number_of_muls(&self) -> u32 {
+        self.eccvm_row_tracker.get_number_of_muls()
     }
 
     /**
@@ -440,145 +344,93 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
     CoECCOpQueue<T, C>
 {
     pub(crate) fn get_msms<N: Network>(&mut self, driver: &mut T) -> eyre::Result<Vec<Msm<C, T>>> {
-        let num_muls = self.get_number_of_muls(driver);
+        let num_muls = self.get_number_of_muls();
 
-        let compute_precomputed_table =
-            |base_point: T::AcvmPoint<C>| -> [T::AcvmPoint<C>; POINT_TABLE_SIZE + 1] {
-                let d2 = driver.scalar_mul_public_scalar(base_point, C::ScalarField::from(2u32));
-                let mut table = [T::AcvmPoint::default(); POINT_TABLE_SIZE + 1];
-                table[POINT_TABLE_SIZE] = d2.into();
-                table[POINT_TABLE_SIZE / 2] = base_point;
+        let compute_precomputed_table = |base_point: T::AcvmPoint<C>,
+                                         driver: &mut T|
+         -> [T::AcvmPoint<C>; POINT_TABLE_SIZE + 1] {
+            let d2 = driver.scalar_mul_public_scalar(base_point, C::ScalarField::from(2u32));
+            let mut table = [T::AcvmPoint::default(); POINT_TABLE_SIZE + 1];
+            table[POINT_TABLE_SIZE] = d2.into();
+            table[POINT_TABLE_SIZE / 2] = base_point;
 
-                for i in 1..(POINT_TABLE_SIZE / 2) {
-                    table[i + POINT_TABLE_SIZE / 2] =
-                        driver.add_points(table[i + POINT_TABLE_SIZE / 2 - 1], d2);
-                }
-
-                for i in 0..(POINT_TABLE_SIZE / 2) {
-                    table[i] = driver.scalar_mul_public_scalar(
-                        table[POINT_TABLE_SIZE - 1 - i],
-                        -C::ScalarField::one(),
-                    );
-                }
-
-                //TODO FLORIN: Make this nicer
-                let mut result = [T::AcvmPoint::default(); POINT_TABLE_SIZE + 1];
-                for (i, point) in table.iter().enumerate() {
-                    result[i] = *point;
-                }
-                result
-            };
-
-        let compute_wnaf_digits = |mut scalar: T::AcvmType| -> [i32; NUM_WNAF_DIGITS_PER_SCALAR] {
-            let mut output = [0; NUM_WNAF_DIGITS_PER_SCALAR];
-            let mut previous_slice = 0;
-
-            for i in 0..NUM_WNAF_DIGITS_PER_SCALAR {
-                let raw_slice = &scalar & BigUint::from(WNAF_MASK);
-                let is_even = (&raw_slice & BigUint::one()) == BigUint::zero();
-                let mut wnaf_slice = if let Some(&digit) = raw_slice.to_u32_digits().first() {
-                    digit as i32
-                } else {
-                    0
-                };
-
-                if i == 0 && is_even {
-                    wnaf_slice += 1;
-                } else if is_even {
-                    const BORROW_CONSTANT: i32 = 1 << NUM_WNAF_DIGIT_BITS;
-                    previous_slice -= BORROW_CONSTANT;
-                    wnaf_slice += 1;
-                }
-
-                if i > 0 {
-                    output[NUM_WNAF_DIGITS_PER_SCALAR - i] = previous_slice;
-                }
-                previous_slice = wnaf_slice;
-
-                scalar >>= NUM_WNAF_DIGIT_BITS;
+            for i in 1..(POINT_TABLE_SIZE / 2) {
+                table[i + POINT_TABLE_SIZE / 2] =
+                    driver.add_points(table[i + POINT_TABLE_SIZE / 2 - 1], d2);
             }
 
-            assert!(scalar.is_zero());
-            output[0] = previous_slice;
+            for i in 0..(POINT_TABLE_SIZE / 2) {
+                table[i] = driver.scalar_mul_public_scalar(
+                    table[POINT_TABLE_SIZE - 1 - i],
+                    -C::ScalarField::one(),
+                );
+            }
 
-            output
+            //TODO FLORIN: Make this nicer
+            let mut result = [T::AcvmPoint::default(); POINT_TABLE_SIZE + 1];
+            for (i, point) in table.iter().enumerate() {
+                result[i] = *point;
+            }
+            result
         };
 
-        let mut msm_count = T::AcvmType::default();
-        let mut active_mul_count = T::AcvmType::default();
+        let compute_wnaf_digits =
+            |mut scalar: T::AcvmType| -> [T::AcvmType; NUM_WNAF_DIGITS_PER_SCALAR] {
+                todo!();
+            };
+
+        let mut msm_count = 0;
+        let mut active_mul_count = 0;
         let mut msm_opqueue_index = Vec::new();
         let mut msm_mul_index = Vec::new();
         let mut msm_sizes = Vec::new();
 
         let eccvm_ops = self.get_eccvm_ops();
-        //TODO FLORIN: Do only the ones needed
-        let mut z1s = Vec::with_capacity(eccvm_ops.len());
-        let mut z2s = Vec::with_capacity(eccvm_ops.len());
-        let mut base_points = Vec::with_capacity(eccvm_ops.len());
-        for op in eccvm_ops.iter() {
-            z1s.push(op.z1);
-            z2s.push(op.z2);
-            base_points.push(op.base_point);
-        }
-        //TODO FLORIN Optimize this
-        let is_zeros = driver.is_zero_many(&[z1s.as_slice(), z2s.as_slice()].concat())?;
-        let is_zero_z1s = &is_zeros[0..z1s.len()];
-        let is_zero_z2s = &is_zeros[z1s.len()..];
-        let scale = driver.scale_many(is_zero_z1s, -C::BaseField::one());
-        let inv_is_zero_z1s = driver.add_scalar(&scale, C::BaseField::one());
-        let scale = driver.scale_many(is_zero_z2s, -C::BaseField::one());
-        let inv_is_zero_z2s = driver.add_scalar(&scale, C::BaseField::one());
-        let is_zero_base_points = driver.point_is_zero_many(&base_points)?;
-        let scale = driver.scale_many(&is_zero_base_points, -C::BaseField::one());
-        let inv_is_zero_base_points = driver.add_scalar(&scale, C::BaseField::one());
-        let added = driver.add_many(&inv_is_zero_z1s, &inv_is_zero_z2s);
-        let mul = driver.mul_many(&added, &inv_is_zero_base_points)?;
-        let op_indices: Vec<C::BaseField> = (0..eccvm_ops.len())
-            .map(|i| C::BaseField::from(i as u32))
-            .collect();
-        let op_indices = driver.mul_with_public_many(&op_indices, &mul);
-
-        //TACEO TODO: This has to be optimized
         for (op_idx, op) in eccvm_ops.iter().enumerate() {
             if op.op_code.mul {
-                // if (op.z1 != BigUint::zero() || op.z2 != BigUint::zero())
-                //     && !op.base_point.is_zero()
-                // {
-                //     msm_mul_index.push((msm_count, active_mul_count));
-                // }
-                let mul = driver.mul_many(&[msm_count, active_mul_count], &[mul[op_idx]; 2])?;
-                msm_mul_index.push((mul[0], mul[1]));
-                msm_opqueue_index.push(op_indices[op_idx]);
-                // active_mul_count +=
-                //     (op.z1 != BigUint::zero()) as usize + (op.z2 != BigUint::zero()) as usize;
-                driver.add_assign(&mut active_mul_count, mul[op_idx]);
-            } else {
-                //if active_mul_count > 0 {
-                let is_zero = driver.is_zero_many(&[active_mul_count])?[0];
-                let mut inv_is_zero = driver.mul_with_public(-C::BaseField::one(), is_zero);
-                driver.add_assign_with_public(C::BaseField::one(), &mut inv_is_zero);
-                let mul = driver.mul_many(&[active_mul_count], &[inv_is_zero])?;
-
-                msm_sizes.push(mul[0]);
-
-                driver.add_assign(&mut msm_count, inv_is_zero);
-                // msm_count += 1;
-                active_mul_count = is_zero;
+                if (op.z1_is_zero == false || op.z2_is_zero == false)
+                    && op.base_point_is_zero == false
+                {
+                    msm_opqueue_index.push(op_idx);
+                    msm_mul_index.push((msm_count, active_mul_count));
+                    active_mul_count +=
+                        (op.z1_is_zero == false) as usize + (op.z2_is_zero == false) as usize;
+                }
+            } else if active_mul_count > 0 {
+                msm_sizes.push(active_mul_count);
+                msm_count += 1;
+                active_mul_count = 0;
             }
         }
 
-        let active_mul_count_is_zero = driver.is_zero_many(&[active_mul_count])?[0];
-        let mul = driver.mul_with_public(-C::BaseField::one(), active_mul_count_is_zero);
-        let inv_is_zero = driver.add(T::AcvmType::from(C::BaseField::one()), mul);
-        let mul = driver.mul_many(&[active_mul_count], &[inv_is_zero])?;
-        if eccvm_ops.last().is_some_and(|op| op.op_code.mul) {
-            msm_sizes.push(mul[0]);
-            driver.add_assign(&mut msm_count, inv_is_zero);
+        if eccvm_ops.last().is_some_and(|op| op.op_code.mul) && active_mul_count > 0 {
+            msm_sizes.push(active_mul_count);
+            msm_count += 1;
         }
 
         let mut result: Vec<Msm<C, T>> = Vec::with_capacity(msm_count);
         for size in &msm_sizes {
             result.push(vec![ScalarMul::default(); *size]);
+        }
+
+        let mut indices_z1 = Vec::with_capacity(eccvm_ops.len());
+        let mut indices_z2 = Vec::with_capacity(eccvm_ops.len());
+        let mut z1_and_z2 = Vec::with_capacity(2 * eccvm_ops.len());
+        for op in eccvm_ops {
+            if op.op_code.mul {
+                if op.z1_is_zero == false && op.base_point_is_zero == false {
+                    indices_z1.push((msm_count, active_mul_count));
+                    z1_and_z2.push(op.z1.clone());
+                }
+            }
+        }
+        let z1_len = z1_and_z2.len();
+        for op in eccvm_ops {
+            if op.z2_is_zero == false && op.base_point_is_zero == false {
+                indices_z2.push((msm_count, active_mul_count));
+                z1_and_z2.push(op.z2.clone());
+                active_mul_count += 1;
+            }
         }
 
         msm_opqueue_index
@@ -588,31 +440,31 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                 let op = &eccvm_ops[op_idx];
                 let (msm_index, mut mul_index) = msm_mul_index[i];
 
-                if op.z1 != BigUint::zero() && !op.base_point.is_zero() {
+                if op.z1_is_zero == false && op.base_point_is_zero == false {
                     result[msm_index][mul_index] = ScalarMul {
-                        pc: 0,
+                        pc: T::AcvmType::default(),
                         scalar: op.z1.clone(),
                         base_point: op.base_point,
                         wnaf_digits: compute_wnaf_digits(op.z1.clone()),
                         wnaf_skew: (op.z1.clone() & BigUint::from(1u32)) == BigUint::zero(),
-                        precomputed_table: compute_precomputed_table(op.base_point),
+                        precomputed_table: compute_precomputed_table(op.base_point, driver),
                     };
                     mul_index += 1;
                 }
 
-                if op.z2 != BigUint::zero() && !op.base_point.is_zero() {
-                    let endo_point = C::g1_affine_from_xy(
-                        op.base_point.x().expect("BasePoint should not be zero")
-                            * C::get_cube_root_of_unity(),
-                        -op.base_point.y().expect("BasePoint should not be zero"),
-                    );
+                if op.z2_is_zero == false && op.base_point_is_zero == false {
+                    let endo_point: T::AcvmPoint<C> = todo!(); //  C::g1_affine_from_xy(
+                    //     op.base_point.x().expect("BasePoint should not be zero")
+                    //         * C::get_cube_root_of_unity(),
+                    //     -op.base_point.y().expect("BasePoint should not be zero"),
+                    // );
                     result[msm_index][mul_index] = ScalarMul {
-                        pc: 0,
+                        pc: T::AcvmType::default(),
                         scalar: op.z2.clone(),
                         base_point: endo_point,
                         wnaf_digits: compute_wnaf_digits(op.z2.clone()),
                         wnaf_skew: (op.z2.clone() & BigUint::from(1u32)) == BigUint::zero(),
-                        precomputed_table: compute_precomputed_table(endo_point),
+                        precomputed_table: compute_precomputed_table(endo_point, driver),
                     };
                 }
             });
@@ -670,7 +522,7 @@ pub(crate) struct MSMRow<
     T: NoirWitnessExtensionProtocol<C::BaseField>,
 > {
     // Counter over all half-length scalar muls used to compute the required MSMs
-    pub(crate) pc: T::AcvmType,
+    pub(crate) pc: usize,
     // The number of points that will be scaled and summed
     pub(crate) msm_size: u32,
     pub(crate) msm_count: u32,
@@ -689,7 +541,7 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: Pri
 {
     fn default() -> Self {
         Self {
-            pc: T::AcvmType::default(),
+            pc: 0,
             msm_size: 0,
             msm_count: 0,
             msm_round: 0,
@@ -731,50 +583,63 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
 {
     pub(crate) fn compute_rows_msms<N: Network>(
         msms: &[Msm<C, T>],
-        total_number_of_muls: T::AcvmType,
+        total_number_of_muls: usize,
         num_msm_rows: usize,
         driver: &mut T,
     ) -> eyre::Result<(Vec<Self>, [Vec<T::AcvmType>; 2])> {
-        let num_rows_in_read_counts_table = driver.mul_with_public(
-            C::BaseField::from((POINT_TABLE_SIZE / 2) as u32),
-            total_number_of_muls,
-        );
+        let num_rows_in_read_counts_table =
+            (total_number_of_muls as usize) * (POINT_TABLE_SIZE / 2);
+        let mut point_table_read_counts = [
+            vec![T::AcvmType::default(); num_rows_in_read_counts_table],
+            vec![T::AcvmType::default(); num_rows_in_read_counts_table],
+        ];
 
-        // (total_number_of_muls as usize) * (POINT_TABLE_SIZE / 2);
-        let mut point_table_read_counts = [Vec::new(), Vec::new()];
+        // let mut update_read_count = |point_idx: T::AcvmType,
+        //                              slice: T::AcvmType,
+        //                              driver: &mut T|
+        //  -> eyre::Result<()> {
+        //     let row_index_offset = driver.mul_with_public(C::BaseField::from(8), point_idx);
+        //     let digit_is_negative = driver.lt(slice, T::AcvmType::default())?;
+        //     let mul = driver.mul_with_public(-C::BaseField::one(), digit_is_negative);
+        //     let inv_digit_is_negative = driver.add(T::AcvmType::from(C::BaseField::one()), mul);
+        //     let mut relative_row_idx = slice; //((slice + 15) / 2) as usize;
+        //     driver.add_assign_with_public(C::BaseField::from(15), &mut relative_row_idx);
+        //     relative_row_idx = driver.mul_with_public(
+        //         C::BaseField::from(2)
+        //             .inverse()
+        //             .expect("2 should have an inverse..."),
+        //         relative_row_idx,
+        //     );
+        //     //TODO FLORIN DONT INITIALIZE THIS EVERY TIME
+        //     let mut lut_1 = T::init_lut_by_acvm_type(driver, point_table_read_counts[0].clone());
+        //     let mut lut_2 = T::init_lut_by_acvm_type(driver, point_table_read_counts[1].clone());
+        //     let first_index = driver.add(row_index_offset, relative_row_idx);
+        //     let mut second_index = driver.sub(row_index_offset, relative_row_idx);
+        //     driver.add_assign_with_public(C::BaseField::from(15), &mut second_index);
+        //     let mut first_value = driver.read_lut_by_acvm_type(first_index, &lut_1)?;
+        //     let mut second_value = driver.read_lut_by_acvm_type(second_index, &lut_2)?;
+        //     driver.add_assign(&mut first_value, digit_is_negative);
+        //     driver.add_assign(&mut second_value, inv_digit_is_negative);
+        //     driver.write_lut_by_acvm_type(first_index, first_value, &mut lut_1)?;
+        //     driver.write_lut_by_acvm_type(second_index, second_value, &mut lut_2)?;
+        //     point_table_read_counts[0] = T::get_shared_lut(&lut_1)?.to_vec();
+        //     point_table_read_counts[1] = T::get_shared_lut(&lut_2)?.to_vec();
 
-        let mut update_read_count = |point_idx: T::AcvmType,
-                                     slice: T::AcvmType,
-                                     driver: &mut T|
-         -> eyre::Result<()> {
-            let row_index_offset = driver.mul_with_public(C::BaseField::from(8), point_idx);
-            let digit_is_negative = driver.lt(slice, T::AcvmType::default())?;
-            let mul = driver.mul_with_public(-C::BaseField::one(), digit_is_negative);
-            let inv_digit_is_negative = driver.add(T::AcvmType::from(C::BaseField::one()), mul);
-            let mut relative_row_idx = slice; //((slice + 15) / 2) as usize;
-            driver.add_assign_with_public(C::BaseField::from(15), &mut relative_row_idx);
-            relative_row_idx = driver.mul_with_public(
-                C::BaseField::from(2)
-                    .inverse()
-                    .expect("2 should have an inverse..."),
-                relative_row_idx,
-            );
-            //TODO FLORIN DONT INITIALIZE THIS EVERY TIME
-            let mut lut_1 = T::init_lut_by_acvm_type(driver, point_table_read_counts[0].clone());
-            let mut lut_2 = T::init_lut_by_acvm_type(driver, point_table_read_counts[1].clone());
-            let first_index = driver.add(row_index_offset, relative_row_idx);
-            let mut second_index = driver.sub(row_index_offset, relative_row_idx);
-            driver.add_assign_with_public(C::BaseField::from(15), &mut second_index);
-            let mut first_value = driver.read_lut_by_acvm_type(first_index, &lut_1)?;
-            let mut second_value = driver.read_lut_by_acvm_type(second_index, &lut_2)?;
-            driver.add_assign(&mut first_value, digit_is_negative);
-            driver.add_assign(&mut second_value, inv_digit_is_negative);
-            driver.write_lut_by_acvm_type(first_index, first_value, &mut lut_1)?;
-            driver.write_lut_by_acvm_type(second_index, second_value, &mut lut_2)?;
-            point_table_read_counts[0] = T::get_shared_lut(&lut_1)?.to_vec();
-            point_table_read_counts[1] = T::get_shared_lut(&lut_2)?.to_vec();
+        //     Ok(())
+        // };
 
-            Ok(())
+        let mut update_read_count = |point_idx: usize, slice: T::AcvmType| {
+            let row_index_offset = point_idx * 8;
+            let digit_is_negative = slice < 0;
+            let relative_row_idx = ((slice + 15) / 2) as usize; //Attention FLORIN, this is already done for the slices
+            let column_index = if digit_is_negative { 1 } else { 0 };
+
+            if digit_is_negative {
+                point_table_read_counts[column_index][row_index_offset + relative_row_idx] += 1;
+            } else {
+                point_table_read_counts[column_index][row_index_offset + 15 - relative_row_idx] +=
+                    1;
+            }
         };
 
         let mut msm_row_counts = Vec::with_capacity(msms.len() + 1);
@@ -784,18 +649,14 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
         pc_values.push(total_number_of_muls);
 
         for msm in msms {
-            let num_rows_required = CoEccvmRowTracker::<T, C>::num_eccvm_msm_rows_public(msm.len());
+            let num_rows_required = EccvmRowTracker::num_eccvm_msm_rows(msm.len());
             msm_row_counts.push(
                 msm_row_counts
                     .last()
                     .expect("msm_row_counts should not be empty")
                     + num_rows_required as usize,
             );
-            let add = driver.add(
-                *pc_values.last().expect("pc_values should not be empty"),
-                T::AcvmType::from(-C::BaseField::from(msm.len() as u32)),
-            );
-            pc_values.push(add);
+            pc_values.push(pc_values.last().expect("pc_values should not be empty") - msm.len());
         }
 
         let mut msm_rows = vec![MSMRow::default(); num_msm_rows];
@@ -827,15 +688,8 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                         if add {
                             let slice = msm[point_idx].wnaf_digits[digit_idx];
                             update_read_count(
-                                driver.add(
-                                    total_number_of_muls,
-                                    driver.sub(
-                                        T::AcvmType::from(C::BaseField::from(point_idx as u32)),
-                                        pc,
-                                    ),
-                                ),
+                                (total_number_of_muls as usize - pc as usize) + point_idx,
                                 slice,
-                                driver,
                             );
                         }
                     }
@@ -855,14 +709,9 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                             let point_idx = offset + relative_point_idx;
                             if add {
                                 let slice = if msm[point_idx].wnaf_skew { -1 } else { -15 };
-                                let sub = driver.sub(total_number_of_muls, pc);
                                 update_read_count(
-                                    driver.add(
-                                        sub,
-                                        T::AcvmType::from(C::BaseField::from(point_idx as u32)),
-                                    ),
-                                    T::AcvmType::from(C::BaseField::from(slice)),
-                                    driver,
+                                    (total_number_of_muls as usize - pc as usize) + point_idx,
+                                    slice,
                                 );
                             }
                         }
@@ -944,7 +793,7 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                         // form of the WNAF slice value. (compressed = no gaps in the value range. i.e. -15,
                         // -13, ..., 15 maps to 0, ..., 15).
                         add_state.slice = if add_state.add {
-                            let mut tmp = slice; //((slice + 15) / 2) as usize;
+                            let mut tmp = slice; //((slice + 15) / 2) as usize; //Attention FLORIN, this is already done for the slices
                             driver.add_assign_with_public(C::BaseField::from(15), &mut tmp);
                             tmp = driver.mul_with_public(
                                 C::BaseField::from(2)

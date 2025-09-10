@@ -1581,6 +1581,7 @@ mod field_share {
             should_result_unchanged.extend(outputs_unchanged);
         }
 
+        //TODO FLORIN
         for chunk in should_result_unchanged.chunks(NUM_WNAF_DIGITS_PER_SCALAR) {
             for i in 0..num_rows_per_scalar {
                 let slice0 = &chunk[i * WNAF_DIGITS_PER_ROW + 3];

@@ -1274,7 +1274,7 @@ where
         crs: &ProverCrs<P>,
     ) -> HonkProofResult<()> {
         // Compute permutation grand product and their commitments
-        // self.compute_grand_product(proving_key, unmasked_witness_size); TODO FLORIN
+        self.compute_grand_product(proving_key, unmasked_witness_size);
         // we do std::mem::take here to avoid borrowing issues with self
         let mut z_perm_tmp = std::mem::take(&mut self.memory.z_perm);
         // self.commit_to_witness_polynomial(&mut z_perm_tmp, "Z_PERM", &crs, transcript)?;
