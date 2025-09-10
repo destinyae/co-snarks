@@ -1485,7 +1485,7 @@ mod field_share {
 
     #[test]
     fn rep3_compute_wnaf_digits() {
-        const VEC_SIZE: usize = 1;
+        const VEC_SIZE: usize = 10;
         const TOTAL_BIT_SIZE: usize = 32;
 
         const NUM_SCALAR_BITS: usize = 128; // The length of scalars handled by the ECCVVM
@@ -1581,41 +1581,43 @@ mod field_share {
             should_result_unchanged.extend(outputs_unchanged);
         }
 
-        for i in 0..num_rows_per_scalar {
-            let slice0 = &should_result_unchanged[i * WNAF_DIGITS_PER_ROW + 3];
-            let slice1 = &should_result_unchanged[i * WNAF_DIGITS_PER_ROW + 2];
-            let slice2 = &should_result_unchanged[i * WNAF_DIGITS_PER_ROW + 1];
-            let slice3 = &should_result_unchanged[i * WNAF_DIGITS_PER_ROW];
-            let row_chunk = slice3 + (slice2 << 4) + (slice1 << 8) + (slice0 << 12);
+        for chunk in should_result_unchanged.chunks(NUM_WNAF_DIGITS_PER_SCALAR) {
+            for i in 0..num_rows_per_scalar {
+                let slice0 = &chunk[i * WNAF_DIGITS_PER_ROW + 3];
+                let slice1 = &chunk[i * WNAF_DIGITS_PER_ROW + 2];
+                let slice2 = &chunk[i * WNAF_DIGITS_PER_ROW + 1];
+                let slice3 = &chunk[i * WNAF_DIGITS_PER_ROW];
+                let row_chunk = slice3 + (slice2 << 4) + (slice1 << 8) + (slice0 << 12);
 
-            let slice0base2 = (slice0 + 15) / 2;
-            let slice1base2 = (slice1 + 15) / 2;
-            let slice2base2 = (slice2 + 15) / 2;
-            let slice3base2 = (slice3 + 15) / 2;
+                let slice0base2 = (slice0 + 15) / 2;
+                let slice1base2 = (slice1 + 15) / 2;
+                let slice2base2 = (slice2 + 15) / 2;
+                let slice3base2 = (slice3 + 15) / 2;
 
-            // Convert into 2-bit chunks
-            let row_s1 = slice0base2 >> 2;
-            let row_s2 = slice0base2 & 3;
-            let row_s3 = slice1base2 >> 2;
-            let row_s4 = slice1base2 & 3;
-            let row_s5 = slice2base2 >> 2;
-            let row_s6 = slice2base2 & 3;
-            let row_s7 = slice3base2 >> 2;
-            let row_s8 = slice3base2 & 3;
-            should_result_row_s.push(ark_bn254::Fr::from(row_s1 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s2 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s3 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s4 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s5 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s6 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s7 as u64));
-            should_result_row_s.push(ark_bn254::Fr::from(row_s8 as u64));
-            if row_chunk < 0 {
-                should_result_row_chunks_neg.push(ark_bn254::Fr::one())
-            } else {
-                should_result_row_chunks_neg.push(ark_bn254::Fr::zero())
+                // Convert into 2-bit chunks
+                let row_s1 = slice0base2 >> 2;
+                let row_s2 = slice0base2 & 3;
+                let row_s3 = slice1base2 >> 2;
+                let row_s4 = slice1base2 & 3;
+                let row_s5 = slice2base2 >> 2;
+                let row_s6 = slice2base2 & 3;
+                let row_s7 = slice3base2 >> 2;
+                let row_s8 = slice3base2 & 3;
+                should_result_row_s.push(ark_bn254::Fr::from(row_s1 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s2 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s3 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s4 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s5 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s6 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s7 as u64));
+                should_result_row_s.push(ark_bn254::Fr::from(row_s8 as u64));
+                if row_chunk < 0 {
+                    should_result_row_chunks_neg.push(ark_bn254::Fr::one())
+                } else {
+                    should_result_row_chunks_neg.push(ark_bn254::Fr::zero())
+                }
+                should_result_row_chunks.push(ark_bn254::Fr::from(row_chunk.unsigned_abs()));
             }
-            should_result_row_chunks.push(ark_bn254::Fr::from(row_chunk.unsigned_abs()));
         }
 
         let should_result_neg: Vec<ark_bn254::Fr> = should_result_pos
@@ -1637,8 +1639,13 @@ mod field_share {
             std::thread::spawn(move || {
                 let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
 
-                let decomposed =
-                    yao::compute_wnaf_digits_many(&x, &net, &mut state, TOTAL_BIT_SIZE).unwrap();
+                let decomposed = yao::compute_wnaf_digits_and_compute_rows_many(
+                    &x,
+                    &net,
+                    &mut state,
+                    TOTAL_BIT_SIZE,
+                )
+                .unwrap();
                 tx.send(decomposed)
             });
         }
@@ -1673,16 +1680,6 @@ mod field_share {
                 row_chunks_abs.push(second_chunk[16]);
                 row_chunks_neg.push(second_chunk[17]);
             }
-
-            // let tmp_values: Vec<_> = chunk[1..].iter().take(64).step_by(2).cloned().collect();
-            // is_result_values.extend_from_slice(&tmp_values);
-            // let tmp_values: Vec<_> = chunk[2..].iter().take(64).step_by(2).cloned().collect();
-            // is_result_pos.extend_from_slice(&tmp_values);
-            // for second_chunk in chunk[65..].chunks(10) {
-            //     row_s.extend_from_slice(&second_chunk[..8]);
-            //     row_chunks_abs.push(second_chunk[8]);
-            //     row_chunks_neg.push(second_chunk[9]);
-            // }
         }
 
         assert_eq!(is_result_even, should_result_even);
@@ -3902,9 +3899,9 @@ mod curve_share {
         ];
         for p in points {
             let s = rep3::share_curve_point(*p, &mut rng);
-            shares[0].push(s[0].clone());
-            shares[1].push(s[1].clone());
-            shares[2].push(s[2].clone());
+            shares[0].push(s[0]);
+            shares[1].push(s[1]);
+            shares[2].push(s[2]);
         }
 
         let nets = LocalNetwork::new_3_parties();
