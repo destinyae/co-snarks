@@ -597,6 +597,15 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         is_infinity: Self::AcvmType,
     ) -> eyre::Result<Self::AcvmPoint<C>>;
 
+    fn field_shares_to_pointshare_many<C: CurveGroup<BaseField = F>>(
+        &mut self,
+        x: &[Self::AcvmType],
+        y: &[Self::AcvmType],
+        is_infinity: &[Self::AcvmType],
+    ) -> eyre::Result<Vec<Self::AcvmPoint<C>>> {
+        todo!()
+    }
+
     /// Translates a share of the point to a share of its coordinates
     fn pointshare_to_field_shares<C: CurveGroup<BaseField = F>>(
         &mut self,
@@ -607,7 +616,7 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
     #[expect(clippy::type_complexity)]
     fn pointshare_to_field_shares_many<C: CurveGroup<BaseField = F>>(
         &mut self,
-        point: &[Self::AcvmPoint<C>],
+        points: &[Self::AcvmPoint<C>],
     ) -> eyre::Result<(
         Vec<Self::AcvmType>,
         Vec<Self::AcvmType>,
@@ -705,6 +714,28 @@ pub trait NoirWitnessExtensionProtocol<F: PrimeField> {
         &mut self,
         wnaf_digits: &[Self::AcvmType],
     ) -> eyre::Result<Vec<([Self::AcvmType; 8], Self::AcvmType, Self::AcvmType)>> {
+        todo!()
+    }
+
+    #[expect(clippy::type_complexity)]
+    fn compute_wnaf_digits_and_compute_rows_many(
+        &mut self,
+        zs: &[Self::AcvmType],
+        num_bits: usize,
+    ) -> eyre::Result<(
+        Vec<Self::AcvmType>,       // Returns whether the input is even
+        Vec<[Self::AcvmType; 32]>, // Returns the wnaf digits (They are already positive (by adding +15 (and also dividing by 2)))
+        Vec<[Self::AcvmType; 32]>, // Returns whether the wnaf digit is negative
+        Vec<[Self::AcvmType; 64]>, // Returns s1,...,s8 for every 4 wnaf digits (needed later for PointTablePrecomputationRow computation)
+        Vec<[Self::AcvmType; 8]>, // Returns the (absolute) value of the row_chunk (also in PointTablePrecomputationRow computation)
+        Vec<[Self::AcvmType; 8]>, // Returns the sign of the row_chunk (also in PointTablePrecomputationRow computation)
+    )> {
+        todo!()
+    }
+
+    fn compute_endo_point<C: CurveGroup<BaseField = F>>(
+        point: &Self::AcvmPoint<C>,
+    ) -> eyre::Result<Self::AcvmPoint<C>> {
         todo!()
     }
 }

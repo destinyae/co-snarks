@@ -7,6 +7,7 @@ use co_builder::TranscriptFieldType;
 use co_builder::prelude::HonkCurve;
 use co_builder::prelude::offset_generator;
 use common::{mpc::NoirUltraHonkProver, shared_polynomial::SharedPolynomial};
+use goblin::WNAF_DIGITS_PER_ROW;
 use goblin::prelude::EccvmRowTracker;
 use goblin::{
     ADDITIONS_PER_ROW, NUM_WNAF_DIGIT_BITS, NUM_WNAF_DIGITS_PER_SCALAR, POINT_TABLE_SIZE,
@@ -300,11 +301,15 @@ pub(crate) struct ScalarMul<
     T: NoirWitnessExtensionProtocol<C::BaseField>,
     C: CurveGroup<BaseField: PrimeField>,
 > {
-    pub(crate) pc: T::AcvmType,
+    pub(crate) pc: u32,
     pub(crate) scalar: T::AcvmType,
     pub(crate) base_point: T::AcvmPoint<C>,
     pub(crate) wnaf_digits: [T::AcvmType; NUM_WNAF_DIGITS_PER_SCALAR],
-    pub(crate) wnaf_skew: bool,
+    pub(crate) wnaf_digits_sign: [T::AcvmType; NUM_WNAF_DIGITS_PER_SCALAR],
+    pub(crate) wnaf_si: [T::AcvmType; 8 * (NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW)],
+    pub(crate) wnaf_skew: T::AcvmType,
+    pub(crate) row_chunks: [T::AcvmType; NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW],
+    pub(crate) row_chunks_sign: [T::AcvmType; NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW],
     // size bumped by 1 to record base_point.dbl()
     pub(crate) precomputed_table: [T::AcvmPoint<C>; POINT_TABLE_SIZE + 1],
 }
@@ -314,12 +319,18 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: Pri
 {
     fn default() -> Self {
         Self {
-            pc: T::AcvmType::default(),
+            pc: 0,
             scalar: T::AcvmType::default(),
             base_point: T::AcvmPoint::<C>::default(),
             wnaf_digits: [T::AcvmType::default(); NUM_WNAF_DIGITS_PER_SCALAR],
-            wnaf_skew: false,
+            wnaf_skew: T::AcvmType::default(),
             precomputed_table: [T::AcvmPoint::<C>::default(); POINT_TABLE_SIZE + 1],
+            wnaf_digits_sign: [T::AcvmType::default(); NUM_WNAF_DIGITS_PER_SCALAR],
+            wnaf_si: [T::AcvmType::default();
+                8 * (NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW)],
+            row_chunks: [T::AcvmType::default(); NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW],
+            row_chunks_sign: [T::AcvmType::default();
+                NUM_WNAF_DIGITS_PER_SCALAR / WNAF_DIGITS_PER_ROW],
         }
     }
 }
@@ -334,6 +345,10 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: CurveGroup<BaseField: Pri
             wnaf_digits: self.wnaf_digits,
             wnaf_skew: self.wnaf_skew,
             precomputed_table: self.precomputed_table,
+            wnaf_digits_sign: self.wnaf_digits_sign,
+            wnaf_si: self.wnaf_si,
+            row_chunks: self.row_chunks,
+            row_chunks_sign: self.row_chunks_sign,
         }
     }
 }
@@ -413,61 +428,77 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
             result.push(vec![ScalarMul::default(); *size]);
         }
 
-        let mut indices_z1 = Vec::with_capacity(eccvm_ops.len());
-        let mut indices_z2 = Vec::with_capacity(eccvm_ops.len());
         let mut z1_and_z2 = Vec::with_capacity(2 * eccvm_ops.len());
         for op in eccvm_ops {
-            if op.op_code.mul {
-                if op.z1_is_zero == false && op.base_point_is_zero == false {
-                    indices_z1.push((msm_count, active_mul_count));
-                    z1_and_z2.push(op.z1.clone());
-                }
+            if op.z1_is_zero == false && op.base_point_is_zero == false {
+                z1_and_z2.push(op.z1.clone());
             }
         }
         let z1_len = z1_and_z2.len();
         for op in eccvm_ops {
             if op.z2_is_zero == false && op.base_point_is_zero == false {
-                indices_z2.push((msm_count, active_mul_count));
                 z1_and_z2.push(op.z2.clone());
-                active_mul_count += 1;
             }
         }
 
-        msm_opqueue_index
-            .iter()
-            .enumerate()
-            .for_each(|(i, &op_idx)| {
-                let op = &eccvm_ops[op_idx];
-                let (msm_index, mut mul_index) = msm_mul_index[i];
+        let wnaf_result = T::compute_wnaf_digits_and_compute_rows_many(driver, &z1_and_z2, 32)?;
 
-                if op.z1_is_zero == false && op.base_point_is_zero == false {
-                    result[msm_index][mul_index] = ScalarMul {
-                        pc: T::AcvmType::default(),
-                        scalar: op.z1.clone(),
-                        base_point: op.base_point,
-                        wnaf_digits: compute_wnaf_digits(op.z1.clone()),
-                        wnaf_skew: (op.z1.clone() & BigUint::from(1u32)) == BigUint::zero(),
-                        precomputed_table: compute_precomputed_table(op.base_point, driver),
-                    };
-                    mul_index += 1;
-                }
+        let (z1_even, z2_even) = wnaf_result.0.split_at(z1_len);
+        let (z1_wnaf_digits, z2_wnaf_digits) = wnaf_result.1.split_at(z1_len);
+        let (z1_wnaf_digits_sign, z2_wnaf_digits_sign) = wnaf_result.2.split_at(z1_len);
+        let (z1_wnaf_s_i, z2_wnaf_s_i) = wnaf_result.3.split_at(z1_len);
+        let (z1_row_chunks, z2_row_chunks) = wnaf_result.4.split_at(z1_len);
+        let (z1_row_chunks_sign, z2_row_chunks_sign) = wnaf_result.5.split_at(z1_len);
 
-                if op.z2_is_zero == false && op.base_point_is_zero == false {
-                    let endo_point: T::AcvmPoint<C> = todo!(); //  C::g1_affine_from_xy(
-                    //     op.base_point.x().expect("BasePoint should not be zero")
-                    //         * C::get_cube_root_of_unity(),
-                    //     -op.base_point.y().expect("BasePoint should not be zero"),
-                    // );
-                    result[msm_index][mul_index] = ScalarMul {
-                        pc: T::AcvmType::default(),
-                        scalar: op.z2.clone(),
-                        base_point: endo_point,
-                        wnaf_digits: compute_wnaf_digits(op.z2.clone()),
-                        wnaf_skew: (op.z2.clone() & BigUint::from(1u32)) == BigUint::zero(),
-                        precomputed_table: compute_precomputed_table(endo_point, driver),
-                    };
-                }
-            });
+        let mut z1_index = 0;
+        let mut z2_index = 0;
+
+        for (i, &op_idx) in msm_opqueue_index.iter().enumerate() {
+            let op = &eccvm_ops[op_idx];
+            let (msm_index, mut mul_index) = msm_mul_index[i];
+
+            if op.z1_is_zero == false && op.base_point_is_zero == false {
+                result[msm_index][mul_index] = ScalarMul {
+                    pc: 0,
+                    scalar: op.z1.clone(),
+                    base_point: op.base_point,
+                    wnaf_digits: z1_wnaf_digits[z1_index],
+                    wnaf_skew: z1_even[z1_index],
+                    wnaf_digits_sign: z1_wnaf_digits_sign[z1_index],
+                    wnaf_si: z1_wnaf_s_i[z1_index],
+                    precomputed_table: compute_precomputed_table(op.base_point, driver),
+                    row_chunks: z1_row_chunks[z1_index],
+                    row_chunks_sign: z1_row_chunks_sign[z1_index],
+                };
+                mul_index += 1;
+                z1_index += 1;
+            }
+
+            if op.z2_is_zero == false && op.base_point_is_zero == false {
+                let wnaf_digits = z2_wnaf_digits[z2_index];
+                let endo_point = T::compute_endo_point(&op.base_point)?;
+                let cube = C::get_cube_root_of_unity();
+                //  C::g1_affine_from_xy(
+                //     op.base_point.x().expect("BasePoint should not be zero")
+                //         * C::get_cube_root_of_unity(),
+                //     -op.base_point.y().expect("BasePoint should not be zero"),
+                // );
+
+                result[msm_index][mul_index] = ScalarMul {
+                    pc: 0,
+                    scalar: op.z2.clone(),
+                    base_point: endo_point,
+                    wnaf_digits: compute_wnaf_digits(op.z2.clone()),
+                    wnaf_skew: z2_even[z2_index],
+                    precomputed_table: compute_precomputed_table(endo_point, driver),
+                    wnaf_digits_sign: z2_wnaf_digits_sign[z2_index],
+                    wnaf_si: z2_wnaf_s_i[z2_index],
+                    row_chunks: z2_row_chunks[z2_index],
+                    row_chunks_sign: z2_row_chunks_sign[z2_index],
+                };
+                z2_index += 1;
+            }
+        }
 
         let mut pc = num_muls;
         for msm in &mut result {
@@ -629,17 +660,33 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
         // };
 
         let mut update_read_count = |point_idx: usize, slice: T::AcvmType| {
-            let row_index_offset = point_idx * 8;
-            let digit_is_negative = slice < 0;
-            let relative_row_idx = ((slice + 15) / 2) as usize; //Attention FLORIN, this is already done for the slices
-            let column_index = if digit_is_negative { 1 } else { 0 };
+            // let row_index_offset = point_idx * 8;
+            // let digit_is_negative = slice < 0;
+            // let relative_row_idx = ((slice + 15) / 2) as usize; //Attention FLORIN, this is already done for the slices
+            // let column_index = if digit_is_negative { 1 } else { 0 };
 
-            if digit_is_negative {
-                point_table_read_counts[column_index][row_index_offset + relative_row_idx] += 1;
-            } else {
-                point_table_read_counts[column_index][row_index_offset + 15 - relative_row_idx] +=
-                    1;
-            }
+            // if digit_is_negative {
+            //     point_table_read_counts[column_index][row_index_offset + relative_row_idx] += 1;
+            // } else {
+            //     point_table_read_counts[column_index][row_index_offset + 15 - relative_row_idx] +=
+            //         1;
+            // }
+            todo!()
+        };
+
+            let mut update_read_count_negative = |point_idx: usize, slice: T::AcvmType| {
+            // let row_index_offset = point_idx * 8;
+            // let digit_is_negative = slice < 0;
+            // let relative_row_idx = ((slice + 15) / 2) as usize; //Attention FLORIN, this is already done for the slices
+            // let column_index = if digit_is_negative { 1 } else { 0 };
+
+            // if digit_is_negative {
+            //     point_table_read_counts[column_index][row_index_offset + relative_row_idx] += 1;
+            // } else {
+            //     point_table_read_counts[column_index][row_index_offset + 15 - relative_row_idx] +=
+            //         1;
+            // }
+            todo!()
         };
 
         let mut msm_row_counts = Vec::with_capacity(msms.len() + 1);
@@ -708,7 +755,12 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                             let add = num_points_in_row > relative_point_idx;
                             let point_idx = offset + relative_point_idx;
                             if add {
-                                let slice = if msm[point_idx].wnaf_skew { -1 } else { -15 };
+                                let slice = driver.cmux(
+                                    msm[point_idx].wnaf_skew,
+                                    T::AcvmType::from(-C::BaseField::from(1u32)),
+                                    T::AcvmType::from(-C::BaseField::from(15u32)),
+                                )?;
+                            //if msm[point_idx].wnaf_skew { -1 } else { -15 };
                                 update_read_count(
                                     (total_number_of_muls as usize - pc as usize) + point_idx,
                                     slice,
@@ -877,12 +929,17 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                         for point_idx in 0..ADDITIONS_PER_ROW {
                             let add_state = &mut row.add_state[point_idx];
                             add_state.add = num_points_in_row > point_idx;
-                            add_state.slice = if add_state.add {
-                                if msm[offset + point_idx].wnaf_skew {
-                                    T::AcvmType::from(C::BaseField::from(7))
-                                } else {
-                                    T::AcvmType::default()
-                                }
+                            add_state.slice = if add_state.add 
+                            {
+
+
+                                driver.mul_with_public(C::BaseField::from(7),
+                                    msm[offset + point_idx].wnaf_skew)
+                                // if msm[offset + point_idx].wnaf_skew {
+                                //     T::AcvmType::from(C::BaseField::from(7))
+                                // } else {
+                                //     T::AcvmType::default()
+                                // }
                             } else {
                                 T::AcvmType::default()
                             };
@@ -899,14 +956,24 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                             let add_predicate = if add_state.add {
                                 msm[offset + point_idx].wnaf_skew
                             } else {
-                                false
+                                T::AcvmType::default()
                             };
                             let p1 = accumulator;
-                            accumulator = if add_predicate {
-                                driver.add_points(accumulator, add_state.point)
-                            } else {
-                                accumulator
+                            accumulator ={
+                                let added_points=driver.add_points(accumulator, add_state.point);
+                                    
+                                    let add_predicate_inverted=driver.sub(T::AcvmType::from(C::BaseField::one()),add_predicate);
+                                    // let result= driver.multi_scalar_mul(points, scalars_lo, scalars_hi, pedantic_solving);
+                                    todo!()
+
+
+
                             };
+                            //  if add_predicate {
+                            //     driver.add_points(accumulator, add_state.point)
+                            // } else {
+                            //     accumulator
+                            // };
                             p1_trace[trace_index] = p1;
                             p2_trace[trace_index] = add_state.point;
                             p3_trace[trace_index] = accumulator;
@@ -1048,26 +1115,26 @@ impl<T: NoirWitnessExtensionProtocol<C::BaseField>, C: HonkCurve<TranscriptField
                             let add_predicate = if add_state.add {
                                 msm[offset + point_idx].wnaf_skew
                             } else {
-                                false
+                                T::AcvmType::default()
                             };
 
                             let inverse = &inverse_trace[trace_index];
                             let p1 = &p1_trace[trace_index];
                             let p2 = &p2_trace[trace_index];
-                            add_state.collision_inverse = if add_predicate {
-                                *inverse
-                            } else {
-                                T::AcvmType::default()
-                            };
-                            add_state.lambda = if add_predicate {
+                            add_state.collision_inverse = driver.mul(*inverse, add_predicate)?; //TODO FLORIN BATCH THIS
+                            // if add_predicate {
+                            //     *inverse
+                            // } else {
+                            //     T::AcvmType::default()
+                            // };
+                            add_state.lambda = 
                                 //TODO FLORIN: BATCH THIS
-                                let (_, p1_y, _) = driver.pointshare_to_field_shares(*p1)?;
+                          {      let (_, p1_y, _) = driver.pointshare_to_field_shares(*p1)?;
                                 let (_, p2_y, _) = driver.pointshare_to_field_shares(*p2)?;
                                 let sub = driver.sub(p2_y, p1_y);
-                                driver.mul(sub, *inverse)?
-                            } else {
-                                T::AcvmType::default()
-                            };
+                                let inverse = driver.mul(sub, *inverse)?;
+                                driver.mul(inverse, add_predicate)?};
+                        
                             trace_index += 1;
                         }
                         accumulator_index += 1;

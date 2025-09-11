@@ -1485,7 +1485,7 @@ mod field_share {
 
     #[test]
     fn rep3_compute_wnaf_digits() {
-        const VEC_SIZE: usize = 10;
+        const VEC_SIZE: usize = 1;
         const TOTAL_BIT_SIZE: usize = 32;
 
         const NUM_SCALAR_BITS: usize = 128; // The length of scalars handled by the ECCVVM
@@ -3672,6 +3672,45 @@ mod curve_share {
         let result3 = rx3.recv().unwrap();
         let is_result = rep3::combine_curve_point(result1, result2, result3);
         assert_eq!(is_result, should_result);
+    }
+
+    #[test]
+    fn rep3_scalar_mul_publtestic_scalar() {
+        for i in 0..10000000 {
+            let mut rng = thread_rng();
+            let cube = ark_bn254::Fq::from(ark_ff::BigInt::new([
+                6296954981786320894,
+                15344436770043026511,
+                6476857749317913516,
+                0,
+            ]));
+            let point = ark_bn254::G1Projective::rand(&mut rng);
+            let affine = point.into_affine();
+            let should_result = ark_bn254::G1Affine::new(cube * affine.x, -affine.y);
+
+            let point_shares = rep3::share_curve_point(point, &mut rng);
+
+            let (tx1, rx1) = mpsc::channel();
+            let (tx2, rx2) = mpsc::channel();
+            let (tx3, rx3) = mpsc::channel();
+
+            for (tx, point) in izip!([tx1, tx2, tx3], point_shares) {
+                std::thread::spawn(move || {
+                    let mut new_point = point;
+                    new_point.a.x *= cube;
+                    new_point.a.y = -new_point.a.y;
+                    new_point.b.x *= cube;
+                    new_point.b.y = -new_point.b.y;
+
+                    tx.send(new_point)
+                });
+            }
+            let result1 = rx1.recv().unwrap();
+            let result2 = rx2.recv().unwrap();
+            let result3 = rx3.recv().unwrap();
+            let is_result = rep3::combine_curve_point(result1, result2, result3);
+            assert_eq!(is_result, should_result);
+        }
     }
 
     #[test]

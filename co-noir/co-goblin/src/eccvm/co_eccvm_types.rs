@@ -996,9 +996,9 @@ struct PointTablePrecomputationRow<
     s6: T::AcvmType,
     s7: T::AcvmType,
     s8: T::AcvmType,
-    skew: bool,
+    skew: T::AcvmType,
     point_transition: bool,
-    pc: T::AcvmType,
+    pc: u32,
     round: u32,
     scalar_sum: T::AcvmType,
     precompute_accumulator: T::AcvmPoint<C>,
@@ -1018,9 +1018,9 @@ impl<C: CurveGroup<BaseField: PrimeField>, T: NoirWitnessExtensionProtocol<C::Ba
             s6: T::AcvmType::default(),
             s7: T::AcvmType::default(),
             s8: T::AcvmType::default(),
-            skew: false,
+            skew: T::AcvmType::default(),
             point_transition: false,
-            pc: T::AcvmType::default(),
+            pc: 0,
             round: 0,
             scalar_sum: T::AcvmType::default(),
             precompute_accumulator: T::AcvmPoint::<C>::default(),
@@ -1149,7 +1149,11 @@ impl<C: HonkCurve<TranscriptFieldType>, T: NoirWitnessExtensionProtocol<C::BaseF
                 // Convert into 2-bit chunks
 
                 let last_row = i == num_rows_per_scalar - 1;
-                row.skew = if last_row { entry.wnaf_skew } else { false };
+                row.skew = if last_row {
+                    entry.wnaf_skew
+                } else {
+                    T::AcvmType::default()
+                };
                 row.scalar_sum = scalar_sum;
 
                 // Ensure slice1 is positive for the first row of each scalar sum
